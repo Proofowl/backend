@@ -50,6 +50,14 @@ export interface GitHubConfig {
    * change.
    */
   approvedOrgsUrl: string;
+  /**
+   * Path to the operator-asserted approved-orgs allowlist — the
+   * documented fallback used ONLY when the live source above is
+   * unreachable. See src/github/approvedOrgsAllowlist.ts and the README
+   * section "Known limitation: Wave-approval verification". Relative
+   * paths resolve against the process working directory.
+   */
+  approvedOrgsAllowlistPath: string;
 }
 
 export interface AppConfig {
@@ -72,6 +80,7 @@ export const DEFAULT_TESTNET_CONTRACT_ID =
 export const DEFAULT_RPC_URL = "https://soroban-testnet.stellar.org";
 export const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
 export const DEFAULT_APPROVED_ORGS_URL = "https://drips.network/wave/stellar/orgs";
+export const DEFAULT_APPROVED_ORGS_ALLOWLIST_PATH = "config/approved-orgs-allowlist.json";
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const prev = process.env;
@@ -90,6 +99,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         apiBaseUrl: optional("GITHUB_API_BASE_URL", "https://api.github.com"),
         token: process.env.GITHUB_TOKEN || undefined,
         approvedOrgsUrl: optional("WAVE_APPROVED_ORGS_URL", DEFAULT_APPROVED_ORGS_URL),
+        approvedOrgsAllowlistPath: optional(
+          "APPROVED_ORGS_ALLOWLIST_PATH",
+          DEFAULT_APPROVED_ORGS_ALLOWLIST_PATH,
+        ),
       },
       // Prisma resolves a relative `file:` URL against prisma/ (the
       // schema dir), so this lands at prisma/dev.db.
