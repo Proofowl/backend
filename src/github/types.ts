@@ -78,6 +78,16 @@ export interface CheckOutcome {
   status: CheckStatus;
   /** One-line human summary of why this status. */
   detail: string;
+  /**
+   * Set when this status was NOT reached by the normal automated path.
+   * Currently only `repo_in_approved_orgs` uses it: a value of
+   * `"manually-asserted-allowlist"` means the `pass`/`fail` came from an
+   * operator-curated fallback list (with the asserter/date/evidence in
+   * `evidence.assertion`), NOT from an independently-verifiable live
+   * Wave source. Absent = ordinary automated outcome. Downstream code
+   * that treats a `pass` as third-party-verifiable MUST check this.
+   */
+  confidence?: string;
   /** Raw values the decision was made from, for audit / debugging. */
   evidence: Record<string, unknown>;
 }
