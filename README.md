@@ -76,13 +76,72 @@ merged it are the same. This is a **flag, not a check**: the caller
 decides policy (reject vs. attest-and-mark). `attestable` is true iff
 every gating check is `pass`; the flag does not affect it.
 
-> **Approved-orgs list.** The task points at
-> `drips.network/wave/stellar/orgs`. That URL currently serves a
-> client-rendered page with no confirmed public JSON endpoint, so
-> `HttpApprovedOrgsSource` fetches it live, tries to parse a list, and
-> reports `indeterminate` (never a hardcoded snapshot, never a silent
-> pass) when it cannot. Point `WAVE_APPROVED_ORGS_URL` at a real JSON
-> endpoint once one is known.
+### Known limitation: Wave-approval verification
+
+`repo_in_approved_orgs` is the one check that **cannot be fully
+automated today**, and its "pass" is **not independently verifiable**
+the way the rest of this project is designed to be. Read this before
+relying on it.
+
+**Why.** Drips' Wave approved-orgs list lives at
+`drips.network/wave/stellar/orgs`, which is a client-rendered
+application, not a public API. Its data endpoint
+(`/wave/stellar/orgs/__data.json`) returns nothing without a
+`waveAccessToken`. There is no reachable public data source for this
+list. This is not something this repo can fix — it needs Drips to
+publish an endpoint.
+
+**Live source, tried first, unchanged.** `HttpApprovedOrgsSource` still
+fetches `WAVE_APPROVED_ORGS_URL` on every check and parses whatever it
+gets (JSON shapes or `github.com/<org>` slugs in HTML). If Drips ever
+ships a JSON endpoint, point `WAVE_APPROVED_ORGS_URL` at it and this
+check becomes genuinely automated with no further change. Until then the
+live source can only return `indeterminate`.
+
+**Fallback: an operator-asserted allowlist.** When the live source is
+unavailable, the check consults a manual list an operator curates:
+`config/approved-orgs-allowlist.json` (path overridable via
+`APPROVED_ORGS_ALLOWLIST_PATH`). Each entry carries `repo`
+(`owner/name`), `assertedBy`, `assertedAt` (ISO date), and `evidenceUrl`
+— a link to whatever justified it (a Wave issue page, a maintainer
+dashboard, …). A bare list of repo names with no provenance is
+rejected.
+
+**What a manual "pass" does and does not mean:**
+
+- It **does** mean: a specific, named person (`assertedBy`) asserted on
+  a specific date (`assertedAt`) that this repo is Wave-approved, and
+  left a link (`evidenceUrl`) to their basis.
+- It **does not** mean: a third party can re-derive that from public
+  data. A live-sourced pass is checkable by anyone; a manual pass is
+  only as good as the operator's word plus whatever their `evidenceUrl`
+  shows. It is a weaker claim than the on-chain attestations this
+  project exists to produce, which are designed to be independently
+  verifiable.
+- It is **marked as such in the returned data**, not just here: the
+  check's `confidence` field is `"manually-asserted-allowlist"` and
+  `evidence.assertion` carries the `assertedBy` / `assertedAt` /
+  `evidenceUrl` inline. Any downstream code that treats a `pass` as
+  third-party-verifiable must inspect `confidence`.
+
+**The four outcomes:**
+
+| live Wave source    | allowlist                | result                                                                                       |
+| ------------------- | ------------------------ | -------------------------------------------------------------------------------------------- |
+| returns a real list | (ignored)                | `pass` / `fail` from the live list, no `confidence` marker — as today                        |
+| unavailable         | repo present             | `pass`, `confidence: "manually-asserted-allowlist"`, provenance inline                       |
+| unavailable         | repo absent              | `fail`, `confidence: "operator-allowlist-absent"` — a curated set's absence is a decisive no |
+| unavailable         | not configured (no file) | `indeterminate` — unchanged from before the fallback existed                                 |
+
+**Default behaviour.** The committed seed file asserts exactly two
+repos: `proofowl/proofowl-contracts` and `proofowl/proofowl-backend`
+(asserted by this project's maintainer, `evidenceUrl` → the real
+`github.com/Proofowl` org). So out of the box, while Drips is
+unreachable, `repo_in_approved_orgs` is `pass` only for those two and
+`fail` for every other repo. An operator extends the file as they
+verify more repos; deleting it (or pointing `APPROVED_ORGS_ALLOWLIST_PATH`
+at a non-existent path) returns the check to `indeterminate` on live
+failure.
 
 ### On-chain reads
 
