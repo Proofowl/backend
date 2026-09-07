@@ -52,7 +52,7 @@ that repo's `sdk/typescript` package as a dependency and its
 | Path           | What it is                                                                                                                                                                                                |
 | -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `src/hashing/` | `github_id_hash` / `pr_hash` per `identifier-spec-v1` — an independent implementation, cross-checked against the contracts SDK and the spec's published vectors.                                          |
-| `src/github/`  | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` are interfaces (fixtures in tests).                                    |
+| `src/github/`  | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` / `ApprovedOrgsAllowlistSource` are interfaces (fixtures in tests).    |
 | `src/chain/`   | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. |
 | `src/queue/`   | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                            |
 | `src/app.ts`   | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                       |
@@ -65,7 +65,7 @@ or `indeterminate` (upstream unavailable / ambiguous).
 
 | id                             | checks                                                                                                     |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| `repo_in_approved_orgs`        | the PR's owner is in Wave's approved-orgs list (fetched live; see note below)                              |
+| `repo_in_approved_orgs`        | live Wave list first, then an operator-asserted allowlist fallback — see "Known limitation" below          |
 | `issue_has_wave_label`         | the resolved issue carries the Wave label                                                                  |
 | `wave_label_predates_pr_merge` | the Wave label's applied-at timestamp is before the PR's merge timestamp                                   |
 | `pr_closes_issue`              | the PR is linked to the issue via GitHub's own closing-issue mechanism (GraphQL `closingIssuesReferences`) |
