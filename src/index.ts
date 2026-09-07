@@ -8,4 +8,5 @@
 export * from "./config.js";
 export * from "./lib/errors.js";
 export * as hashing from "./hashing/index.js";
+export * as github from "./github/index.js";
 export { buildApp } from "./app.js";
