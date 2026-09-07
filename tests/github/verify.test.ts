@@ -156,6 +156,72 @@ test("case 4: live source unavailable, allowlist source present but file absent 
   assert.equal(result.indeterminate, true);
 });
 
+test("case 2: live unavailable + repo IS on the allowlist -> pass, marked manually-asserted", async () => {
+  const result = await verifyContribution(CANDIDATE, {
+    github: fakeGitHubClient(),
+    approvedOrgs: liveUnavailable,
+    approvedOrgsAllowlist: allowlistWithCandidate(),
+  });
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "pass");
+  assert.equal(check.confidence, "manually-asserted-allowlist");
+
+  // provenance is in the RETURNED data, not just a log
+  assert.match(check.detail, /NOT independently verified/);
+  assert.match(check.detail, /asserted by test operator on 2026-09-07/);
+  assert.match(check.detail, /evidence https:\/\/github\.com\/stellar\/soroban-examples/);
+  assert.deepEqual(check.evidence.assertion, {
+    repo: "stellar/soroban-examples",
+    assertedBy: "test operator",
+    assertedAt: "2026-09-07",
+    evidenceUrl: "https://github.com/stellar/soroban-examples",
+    note: "seed for tests",
+  });
+  assert.equal(check.evidence.decidedBy, "operator-allowlist");
+  assert.equal(check.evidence.liveSourceStatus, "indeterminate");
+
+  // a manually-asserted pass still lets the whole result be attestable
+  assert.equal(result.attestable, true);
+  assert.equal(result.indeterminate, false);
+});
+
+test("case 3: live unavailable + repo NOT on the allowlist -> decisive fail", async () => {
+  const result = await verifyContribution(
+    { ...CANDIDATE, owner: "randouser", repo: "randorepo" },
+    {
+      github: fakeGitHubClient(),
+      approvedOrgs: liveUnavailable,
+      approvedOrgsAllowlist: allowlistWithCandidate(), // only has stellar/soroban-examples
+    },
+  );
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "fail");
+  assert.equal(check.confidence, "operator-allowlist-absent");
+  assert.match(check.detail, /NOT on the operator-asserted approved-orgs allowlist \(1 entry\)/);
+  assert.match(check.detail, /decisive no/);
+  assert.equal(check.evidence.decidedBy, "operator-allowlist");
+  assert.equal(check.evidence.allowlistEntryCount, 1);
+  assert.equal(result.attestable, false);
+  assert.equal(result.indeterminate, false, "a curated-list miss is a fail, not a maybe");
+});
+
+test("live unavailable + allowlist file present but MALFORMED -> indeterminate, loudly", async () => {
+  const brokenAllowlist = {
+    async load(): Promise<never> {
+      throw new Error("approved-orgs allowlist at /x is not valid JSON: Unexpected token");
+    },
+  };
+  const result = await verifyContribution(CANDIDATE, {
+    github: fakeGitHubClient(),
+    approvedOrgs: liveUnavailable,
+    approvedOrgsAllowlist: brokenAllowlist,
+  });
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "indeterminate");
+  assert.match(check.detail, /operator allowlist is unusable/);
+  assert.match(String(check.evidence.allowlistError), /not valid JSON/);
+});
+
 test("issue carries no Wave label -> issue_has_wave_label fails", async () => {
   const result = await verifyContribution(CANDIDATE, {
     github: fakeGitHubClient({ issue: waveIssue({ labels: [{ name: "bug" }, { name: "docs" }] }) }),
