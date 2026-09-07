@@ -1,0 +1,19 @@
+{
+  "description": "Operator-asserted fallback allowlist for the repo_in_approved_orgs verification check. Used ONLY when the live Wave approved-orgs source is unreachable (see README 'Known limitation: Wave-approval verification'). Each entry is a MANUAL assertion by the named operator - a resulting 'pass' is NOT independently verifiable by a third party the way this project's on-chain attestations are. Every entry MUST carry repo / assertedBy / assertedAt / evidenceUrl; a bare repo string is rejected.",
+  "entries": [
+    {
+      "repo": "proofowl/proofowl-contracts",
+      "assertedBy": "akerityonoah (proofowl-backend maintainer)",
+      "assertedAt": "2026-09-07",
+      "evidenceUrl": "https://github.com/Proofowl/proofowl-contracts",
+      "note": "This project's own on-chain registry contract repository, in the Proofowl GitHub org the asserting maintainer controls. Seed entry, not a Wave-approved third-party contribution."
+    },
+    {
+      "repo": "proofowl/proofowl-backend",
+      "assertedBy": "akerityonoah (proofowl-backend maintainer)",
+      "assertedAt": "2026-09-07",
+      "evidenceUrl": "https://github.com/Proofowl",
+      "note": "This repository. Its GitHub remote is Proofowl/backend; the 'proofowl/proofowl-backend' key matches the local project name. Seed entry asserted by its own maintainer, not a Wave approval."
+    }
+  ]
+}
