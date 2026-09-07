@@ -1,0 +1,142 @@
+# proofowl-backend
+
+The verification service for **ProofOwl**. It checks GitHub's public API
+for merged [Stellar Wave](https://drips.network/wave/stellar)
+contributions and — in a later pass — submits them as on-chain
+attestations to the already-deployed
+[`proofowl-contracts`](https://github.com/Proofowl/proofowl-contracts)
+registry.
+
+## What this repo does NOT do yet
+
+This is a **scaffold**, not a running service. In this pass it does not:
+
+- **poll GitHub** on a loop or on a schedule — there is no ingestion
+  worker;
+- **submit any attestation** — no transaction is signed or sent to any
+  contract, on any network; the on-chain integration here is **read-only
+  simulation** only;
+- **expose a REST API** for the frontend — the Express app serves only
+  `/health` and `/ready`;
+- **link wallets**, run the OAuth/challenge flow, or hold an attestor
+  key — there is no attestor secret anywhere in this repo (see
+  [`.env.example`](./.env.example)).
+
+What it _does_ provide: the project structure, the canonical hashing
+module, the GitHub verification logic, read-only on-chain integration via
+the contracts SDK, a one-table local queue, tests, and CI.
+
+## How it fits together
+
+```
+ GitHub public API ──► proofowl-backend ──► proofowl-contracts registry (Soroban)
+ (PRs, issues,          - canonical hashing    - wallet ↔ github_id_hash links
+  timeline, closing     - 5 verification checks - one attestation per merged PR
+  issue links)          - self-merge flag       - reputation score
+                        - on-chain READS        (this repo never writes to it yet)
+                        - queue of verified-
+                          but-unlinked contribs
+                                │
+                        proofowl-frontend (not started) — will read the
+                        registry for passports/leaderboards and drive the
+                        wallet-linking flow.
+```
+
+The contract, its ABI, the canonical identifier spec, and the deployed
+testnet instance all live in `proofowl-contracts`. This service treats
+that repo's `sdk/typescript` package as a dependency and its
+`docs/integration/*` as normative.
+
+## Modules
+
+| Path           | What it is                                                                                                                                                                                                |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/hashing/` | `github_id_hash` / `pr_hash` per `identifier-spec-v1` — an independent implementation, cross-checked against the contracts SDK and the spec's published vectors.                                          |
+| `src/github/`  | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` are interfaces (fixtures in tests).                                    |
+| `src/chain/`   | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. |
+| `src/queue/`   | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                            |
+| `src/app.ts`   | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                       |
+
+### The five verification checks
+
+`verifyContribution` returns each of these as its own `{ status, detail,
+evidence }` — never a single opaque boolean. `status` is `pass`, `fail`,
+or `indeterminate` (upstream unavailable / ambiguous).
+
+| id                             | checks                                                                                                     |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| `repo_in_approved_orgs`        | the PR's owner is in Wave's approved-orgs list (fetched live; see note below)                              |
+| `issue_has_wave_label`         | the resolved issue carries the Wave label                                                                  |
+| `wave_label_predates_pr_merge` | the Wave label's applied-at timestamp is before the PR's merge timestamp                                   |
+| `pr_closes_issue`              | the PR is linked to the issue via GitHub's own closing-issue mechanism (GraphQL `closingIssuesReferences`) |
+| `pr_is_merged`                 | `pull_request.merged === true`, not merely `closed`                                                        |
+
+Plus `flags.selfMerge` — whether the PR's author and the account that
+merged it are the same. This is a **flag, not a check**: the caller
+decides policy (reject vs. attest-and-mark). `attestable` is true iff
+every gating check is `pass`; the flag does not affect it.
+
+> **Approved-orgs list.** The task points at
+> `drips.network/wave/stellar/orgs`. That URL currently serves a
+> client-rendered page with no confirmed public JSON endpoint, so
+> `HttpApprovedOrgsSource` fetches it live, tries to parse a list, and
+> reports `indeterminate` (never a hardcoded snapshot, never a silent
+> pass) when it cannot. Point `WAVE_APPROVED_ORGS_URL` at a real JSON
+> endpoint once one is known.
+
+### On-chain reads
+
+Targets the **v0.3 (crate `0.3.0`)** testnet instance
+`CAIDTSVPQICTA2VLE6BSQYHEELHGPZWQDYWKSDBRW4LYPZH6Q44UTAOA` by default
+(from `proofowl-contracts`' README "Deployed contracts" table).
+
+Scalar reads (`get_admin`, `get_attestor`, `get_attestation_count`,
+`get_reputation_score`, `get_wallet_for_github`, `get_github_for_wallet`)
+go straight through `@proofowl/contract-sdk`'s `createReadClient`. The
+`Attestation`-struct reads go through `src/chain/attestationDecode.ts`, a
+**documented shim**: the pinned `@stellar/stellar-sdk` (16.x) throws
+`ScSpecType scSpecTypeU64 was not string or symbol` when decoding that
+struct from the live v0.3 contract, so the SDK's generated client still
+does the RPC round-trip and the shim only replaces the final
+ScVal→JS step with the generic `scValToNative`. Remove it once the SDK
+bumps `@stellar/stellar-sdk`.
+
+## Setup
+
+Prerequisites: **Node ≥ 22.6** + npm (CI uses Node 24), and a local
+checkout of `proofowl-contracts` as a **sibling directory**
+(`../proofowl-contracts`) — the contract SDK is consumed as a
+`file:` dependency.
+
+```bash
+# from a directory containing both repos
+git clone <proofowl-contracts>        # if you don't have it
+git clone <proofowl-backend> && cd proofowl-backend
+
+# build the sibling SDK once
+( cd ../proofowl-contracts/sdk/typescript && npm ci && npm run build )
+
+npm install                            # runs `prisma generate`
+cp .env.example .env
+npx prisma migrate deploy              # creates prisma/dev.db
+
+npm run check                          # format:check + lint + typecheck + test
+npm run dev                            # starts the /health server (no polling)
+```
+
+### Scripts
+
+| script                     | does                                                                  |
+| -------------------------- | --------------------------------------------------------------------- |
+| `npm run check`            | the full local gate (format, lint, typecheck, unit tests)             |
+| `npm test`                 | compile `tsconfig.test.json` → `node --test`                          |
+| `npm run test:integration` | `PROOFOWL_INTEGRATION=1 npm test` — adds real read-only testnet reads |
+| `npm run build`            | `tsc` → `dist/`                                                       |
+| `npm run dev`              | `tsx watch src/server.ts`                                             |
+
+The `*.integration.test.ts` files are **skipped** unless
+`PROOFOWL_INTEGRATION=1`.
+
+## License
+
+MIT — see [LICENSE](./LICENSE), matching `proofowl-contracts`.
