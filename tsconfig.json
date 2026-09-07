@@ -1,0 +1,31 @@
+{
+  // Matches sdk/typescript/tsconfig.json in proofowl-contracts: strict +
+  // a few extra safety flags, NodeNext modules, ES2022 target. This base
+  // config is what `npm run typecheck` (--noEmit) uses; it covers both
+  // src/ and tests/. tsconfig.build.json narrows it to a dist/ build of
+  // src/ only; tsconfig.test.json compiles src/ + tests/ to test-build/.
+  //
+  // The Prisma client is generated into src/generated/prisma/ (verbatim
+  // codegen, like the contracts SDK's src/generated/) and excluded from
+  // these checks by keeping it under src/generated/.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2023"],
+    "types": ["node"],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true
+  },
+  "include": ["src/**/*.ts", "tests/**/*.ts"],
+  "exclude": ["node_modules", "dist", "test-build", "src/generated/**"]
+}

@@ -1,0 +1,51 @@
+{
+  "name": "proofowl-backend",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Verification service for ProofOwl: checks GitHub for merged Stellar Wave contributions and (in a later pass) submits them as on-chain attestations to the proofowl-contracts registry.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.6.0"
+  },
+  "packageManager": "npm@11.19.0",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "dev": "tsx watch src/server.ts",
+    "start": "node dist/server.js",
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "postinstall": "prisma generate",
+    "pretest": "tsc -p tsconfig.test.json",
+    "test": "node --test \"test-build/**/*.test.js\"",
+    "test:integration": "PROOFOWL_INTEGRATION=1 npm test",
+    "clean": "rm -rf dist test-build",
+    "check": "npm run format:check && npm run lint && npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "@proofowl/contract-sdk": "file:../proofowl-contracts/sdk/typescript",
+    "@prisma/client": "^6.19.0",
+    "@stellar/stellar-sdk": "^16.0.1",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.5",
+    "eslint": "^9.36.0",
+    "prettier": "^3.4.2",
+    "prisma": "^6.19.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3",
+    "typescript-eslint": "^8.20.0"
+  }
+}

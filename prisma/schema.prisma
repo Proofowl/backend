@@ -1,0 +1,85 @@
+// Persistence for proofowl-backend.
+//
+// SCOPE: exactly one thing is persisted in this pass — a queue of
+// contributions that PASSED GitHub verification but cannot be submitted
+// on-chain yet because the contributor's wallet is not linked to their
+// GitHub identity in the registry (submit_attestation would fail with
+// WalletNotLinked, contract error 7 — see
+// ../proofowl-contracts/docs/integration/contract-api-v2.md#errors).
+//
+// No leaderboard cache, no attestation mirror, no REST-API tables —
+// those are explicitly follow-up work.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  // SQLite: no external service, no Docker (neither is available in the
+  // target dev environment). Swappable to Postgres later by changing
+  // `provider` + DATABASE_URL and regenerating migrations. SQLite has no
+  // native enum, so `status` is a String constrained in application code
+  // (see src/queue/status.ts).
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// One verified-but-not-yet-submittable contribution.
+///
+/// A row exists iff, at enqueue time: every GitHub verification check
+/// that gates attestation passed, AND get_wallet_for_github(githubIdHash)
+/// returned null on-chain. Its status advances to READY_TO_SUBMIT once
+/// the wallet links, or ALREADY_ATTESTED / DISMISSED if it becomes moot.
+model PendingContribution {
+  id String @id @default(cuid())
+
+  // --- identity of the contribution (canonical, per identifier-spec-v1) ---
+
+  /// SHA-256 of "proofowl:github-user:v1:<numeric-id>", lowercase hex (64 chars).
+  githubIdHash String
+
+  /// The contributor's GitHub numeric user id (kept in the clear for ops/debugging).
+  githubUserId String
+
+  /// SHA-256 of "github.com/<owner>/<repo>/pull/<number>", lowercase hex (64 chars).
+  /// The registry's global, permanent de-dup key (SeenPr).
+  prHash String @unique
+
+  /// "<owner>/<repo>", lowercased — as it would be stored on-chain.
+  repo String
+
+  /// GitHub pull-request number (u32 range).
+  prNumber Int
+
+  /// Stellar Wave issue id the contribution resolved, or 0 if not applicable.
+  issueId BigInt @default(0)
+
+  /// Wave complexity tier: 0, 100, 150, or 200. 0 = "confirmed, tier unknown".
+  complexity Int @default(0)
+
+  // --- provenance / audit ---
+
+  /// Full VerificationResult JSON at enqueue time (all six checks + flags).
+  verificationJson String
+
+  /// True if verification flagged the PR as author-merged (self-merge).
+  /// Policy on self-merges is decided by the caller, not baked in here.
+  selfMergeFlagged Boolean @default(false)
+
+  /// One of the values in src/queue/status.ts. SQLite has no enum.
+  /// Defaults to WAITING_FOR_WALLET_LINK — the only state this pass produces.
+  status String @default("WAITING_FOR_WALLET_LINK")
+
+  /// Free-text note for the most recent status change.
+  statusNote String?
+
+  attemptCount  Int       @default(0)
+  lastCheckedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+  @@index([githubIdHash])
+}
