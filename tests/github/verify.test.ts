@@ -1,7 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import type { ApprovedOrgsSource } from "../../src/github/approvedOrgs.js";
 import { StaticApprovedOrgsSource } from "../../src/github/approvedOrgs.js";
+import { parseApprovedOrgsAllowlist } from "../../src/github/approvedOrgsAllowlist.js";
+import { StaticApprovedOrgsAllowlistSource } from "../../src/github/approvedOrgsAllowlistSource.js";
 import { verifyContribution, getCheck } from "../../src/github/verify.js";
 import type { VerificationCandidate } from "../../src/github/types.js";
 import { ALICE, BOB, fakeGitHubClient, labeledEvent, mergedPr, waveIssue } from "./fixtures.js";
@@ -14,6 +17,36 @@ const CANDIDATE: VerificationCandidate = {
 };
 
 const approvedOrgs = new StaticApprovedOrgsSource(["stellar", "OtherOrg"]);
+
+/** A live source that is always unavailable — for the fallback cases. */
+const liveUnavailable: ApprovedOrgsSource = {
+  async listApprovedOrgs() {
+    return {
+      status: "indeterminate" as const,
+      reason: "drips.network/wave/stellar/orgs is client-rendered; no public JSON endpoint",
+      source: "https://drips.network/wave/stellar/orgs",
+      fetchedAt: new Date().toISOString(),
+    };
+  },
+};
+
+/** An allowlist source holding one entry for the CANDIDATE repo. */
+function allowlistWithCandidate() {
+  return new StaticApprovedOrgsAllowlistSource(
+    parseApprovedOrgsAllowlist(
+      [
+        {
+          repo: "stellar/soroban-examples",
+          assertedBy: "test operator",
+          assertedAt: "2026-09-07",
+          evidenceUrl: "https://github.com/stellar/soroban-examples",
+          note: "seed for tests",
+        },
+      ],
+      "test-allowlist.json",
+    ),
+  );
+}
 
 test("happy path: every gating check passes, not a self-merge", async () => {
   const result = await verifyContribution(CANDIDATE, {
@@ -68,23 +101,58 @@ test("repo not in approved-orgs list -> that check fails, others still evaluated
   assert.equal(result.indeterminate, false);
 });
 
-test("approved-orgs source indeterminate -> check indeterminate -> result.indeterminate", async () => {
-  const indeterminateSource = {
-    async listApprovedOrgs() {
-      return {
-        status: "indeterminate" as const,
-        reason: "no public JSON endpoint",
-        source: "https://drips.network/wave/stellar/orgs",
-        fetchedAt: new Date().toISOString(),
-      };
-    },
-  };
+// --- repo_in_approved_orgs: allowlist fallback, four cases ------------
+
+test("case 1: live source returns a real list -> used as-is, allowlist ignored, no confidence marker", async () => {
+  // Live 'ok' AND an allowlist that would also match — the live answer wins.
   const result = await verifyContribution(CANDIDATE, {
     github: fakeGitHubClient(),
-    approvedOrgs: indeterminateSource,
+    approvedOrgs: new StaticApprovedOrgsSource(["stellar"]),
+    approvedOrgsAllowlist: allowlistWithCandidate(),
   });
-  assert.equal(getCheck(result, "repo_in_approved_orgs").status, "indeterminate");
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "pass");
+  assert.equal(
+    check.confidence,
+    undefined,
+    "a live-sourced pass carries no manual-assertion marker",
+  );
+  assert.equal(check.evidence.source, "static");
+  assert.equal(check.evidence.decidedBy, undefined);
+});
+
+test("case 1: live source returns a list NOT containing the owner -> fail from live, not the allowlist", async () => {
+  const result = await verifyContribution(CANDIDATE, {
+    github: fakeGitHubClient(),
+    approvedOrgs: new StaticApprovedOrgsSource(["someone-else"]),
+    approvedOrgsAllowlist: allowlistWithCandidate(), // would say pass — but live wins
+  });
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "fail");
+  assert.equal(check.confidence, undefined);
+});
+
+test("case 4: live source unavailable, NO allowlist configured -> indeterminate (unchanged)", async () => {
+  const result = await verifyContribution(CANDIDATE, {
+    github: fakeGitHubClient(),
+    approvedOrgs: liveUnavailable,
+  });
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "indeterminate");
+  assert.equal(check.confidence, undefined);
   assert.equal(result.attestable, false);
+  assert.equal(result.indeterminate, true);
+});
+
+test("case 4: live source unavailable, allowlist source present but file absent (load()->null) -> still indeterminate", async () => {
+  const result = await verifyContribution(CANDIDATE, {
+    github: fakeGitHubClient(),
+    approvedOrgs: liveUnavailable,
+    approvedOrgsAllowlist: new StaticApprovedOrgsAllowlistSource(null),
+  });
+  const check = getCheck(result, "repo_in_approved_orgs");
+  assert.equal(check.status, "indeterminate");
+  assert.equal(check.confidence, undefined);
   assert.equal(result.indeterminate, true);
 });
 
