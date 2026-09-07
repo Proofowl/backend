@@ -39,7 +39,13 @@ npm run check                # baseline must pass before you start
    - **Verification** changes: keep each check independently inspectable
      (`{ status, detail, evidence }`), and keep `indeterminate` distinct
      from `fail`. Drive new branches from fixtures in
-     `tests/github/fixtures.ts`, not live PRs.
+     `tests/github/fixtures.ts`, not live PRs. For `repo_in_approved_orgs`:
+     the live Wave source is always tried first and must not be weakened;
+     any `pass`/`fail` that comes from the operator-asserted allowlist
+     fallback (`config/approved-orgs-allowlist.json`) must carry a
+     `confidence` marker and the entry's provenance in the returned
+     `evidence` — never only in a log or comment. See README "Known
+     limitation: Wave-approval verification".
    - **On-chain** changes: reads only. Never add a code path that signs
      or submits a transaction in this pass. The live integration test
      (`tests/chain/testnet.integration.test.ts`) is opt-in via
