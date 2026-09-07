@@ -10,4 +10,5 @@ export * from "./lib/errors.js";
 export * as hashing from "./hashing/index.js";
 export * as github from "./github/index.js";
 export * as chain from "./chain/index.js";
+export * as queue from "./queue/index.js";
 export { buildApp } from "./app.js";

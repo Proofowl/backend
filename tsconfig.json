@@ -5,9 +5,9 @@
   // src/ and tests/. tsconfig.build.json narrows it to a dist/ build of
   // src/ only; tsconfig.test.json compiles src/ + tests/ to test-build/.
   //
-  // The Prisma client is generated into src/generated/prisma/ (verbatim
-  // codegen, like the contracts SDK's src/generated/) and excluded from
-  // these checks by keeping it under src/generated/.
+  // The Prisma client is generated to node_modules (default output) and
+  // imported as a bare `@prisma/client` specifier, so it resolves the
+  // same from src/, dist/, and test-build/.
   "compilerOptions": {
     "target": "ES2022",
     "module": "NodeNext",
@@ -27,5 +27,5 @@
     "resolveJsonModule": true
   },
   "include": ["src/**/*.ts", "tests/**/*.ts"],
-  "exclude": ["node_modules", "dist", "test-build", "src/generated/**"]
+  "exclude": ["node_modules", "dist", "test-build"]
 }

@@ -91,7 +91,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
         token: process.env.GITHUB_TOKEN || undefined,
         approvedOrgsUrl: optional("WAVE_APPROVED_ORGS_URL", DEFAULT_APPROVED_ORGS_URL),
       },
-      databaseUrl: optional("DATABASE_URL", "file:./prisma/dev.db"),
+      // Prisma resolves a relative `file:` URL against prisma/ (the
+      // schema dir), so this lands at prisma/dev.db.
+      databaseUrl: optional("DATABASE_URL", "file:./dev.db"),
       attestorSecretKeyIsSet: !!process.env.ATTESTOR_SECRET_KEY,
     };
   } finally {

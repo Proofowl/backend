@@ -9,13 +9,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: [
-      "dist/**",
-      "test-build/**",
-      "node_modules/**",
-      "src/generated/**",
-      "prisma/migrations/**",
-    ],
+    ignores: ["dist/**", "test-build/**", "node_modules/**", "prisma/migrations/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
