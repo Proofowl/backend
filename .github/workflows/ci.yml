@@ -1,0 +1,120 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+# Structure mirrors proofowl-contracts/.github/workflows/ci.yml where it
+# translates: one job per concern, GitHub Actions pinned to major tags
+# (full SHA pinning is a tracked hardening task there too), setup-*
+# actions doing the dependency caching. Rust-specific steps (toolchain,
+# clippy, cargo-deny, wasm build, bindings-drift) have no analogue here.
+
+jobs:
+  # Lint + typecheck + unit tests. Networked reads (the live testnet
+  # integration test) are NOT in this job — see `integration` below.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout proofowl-backend
+        uses: actions/checkout@v4
+        with:
+          path: proofowl-backend
+
+      # The contract SDK is consumed as a local `file:` dependency
+      # (../proofowl-contracts/sdk/typescript). CI reconstructs that
+      # sibling layout by checking the contracts repo out next to this
+      # one and building its SDK before `npm ci` here resolves the link.
+      # A private-repo checkout needs a token with read access to
+      # Proofowl/proofowl-contracts; github.token works when the repo is
+      # in the same org and Actions is permitted, otherwise set
+      # secrets.CONTRACTS_REPO_TOKEN.
+      - name: Checkout proofowl-contracts (for the SDK)
+        uses: actions/checkout@v4
+        with:
+          repository: Proofowl/proofowl-contracts
+          path: proofowl-contracts
+          ref: main
+          token: ${{ secrets.CONTRACTS_REPO_TOKEN || github.token }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          # Same Node as proofowl-contracts' `sdk` job.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            proofowl-backend/package-lock.json
+            proofowl-contracts/sdk/typescript/package-lock.json
+
+      - name: Build the contract SDK
+        working-directory: proofowl-contracts/sdk/typescript
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install deps (locked)
+        working-directory: proofowl-backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Format check
+        working-directory: proofowl-backend
+        run: npm run format:check
+
+      - name: Lint
+        working-directory: proofowl-backend
+        run: npm run lint
+
+      - name: Type-check
+        working-directory: proofowl-backend
+        run: npm run typecheck
+
+      - name: Unit tests
+        working-directory: proofowl-backend
+        run: npm test
+
+  # Read-only integration test against the live testnet contract. Slow
+  # and network-dependent, so — like proofowl-contracts' resource-profile
+  # / property-fuzz-deep jobs — it is kept off the default push/PR path
+  # and run on demand. It never signs or submits anything.
+  integration:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout proofowl-backend
+        uses: actions/checkout@v4
+        with:
+          path: proofowl-backend
+
+      - name: Checkout proofowl-contracts (for the SDK)
+        uses: actions/checkout@v4
+        with:
+          repository: Proofowl/proofowl-contracts
+          path: proofowl-contracts
+          ref: main
+          token: ${{ secrets.CONTRACTS_REPO_TOKEN || github.token }}
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            proofowl-backend/package-lock.json
+            proofowl-contracts/sdk/typescript/package-lock.json
+
+      - name: Build the contract SDK
+        working-directory: proofowl-contracts/sdk/typescript
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Install deps (locked)
+        working-directory: proofowl-backend
+        run: npm ci --no-audit --no-fund
+
+      - name: Live testnet read-only integration test
+        working-directory: proofowl-backend
+        run: npm run test:integration
