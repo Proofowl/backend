@@ -4,6 +4,9 @@
  * (never collapsed into one opaque boolean):
  *
  *   a. repo_in_approved_orgs        — owner is in Wave's approved-orgs list
+ *                                     (live source first; falls back to an
+ *                                     operator-asserted allowlist — see
+ *                                     checkRepoInApprovedOrgs below)
  *   b. issue_has_wave_label         — the issue carries the Wave label
  *   c. wave_label_predates_pr_merge — label applied-at < PR merged-at
  *   d. pr_closes_issue              — PR is linked to the issue via GitHub's
@@ -18,7 +21,12 @@
  * affects it — the caller decides that policy.
  */
 
-import { orgIsApproved, type ApprovedOrgsSource } from "./approvedOrgs.js";
+import {
+  orgIsApproved,
+  type ApprovedOrgsSnapshot,
+  type ApprovedOrgsSource,
+} from "./approvedOrgs.js";
+import type { ApprovedOrgsAllowlistSource } from "./approvedOrgsAllowlistSource.js";
 import type { GitHubClient } from "./client.js";
 import type {
   CheckOutcome,
@@ -52,6 +60,14 @@ export function waveLabelMatcherFromNames(names: string[]): WaveLabelMatcher {
 export interface VerifyDeps {
   github: GitHubClient;
   approvedOrgs: ApprovedOrgsSource;
+  /**
+   * Operator-asserted fallback allowlist, consulted ONLY when
+   * `approvedOrgs` is unavailable (indeterminate / errored). Omit it for
+   * "no allowlist configured" — `repo_in_approved_orgs` then stays
+   * `indeterminate` on a live-source failure, exactly as before this
+   * fallback existed.
+   */
+  approvedOrgsAllowlist?: ApprovedOrgsAllowlistSource;
   isWaveLabel?: WaveLabelMatcher;
 }
 
@@ -71,7 +87,7 @@ export async function verifyContribution(
   ]);
 
   const checks: CheckOutcome[] = [
-    await checkRepoInApprovedOrgs(owner, deps.approvedOrgs),
+    await checkRepoInApprovedOrgs({ owner, repo }, deps.approvedOrgs, deps.approvedOrgsAllowlist),
     checkIssueHasWaveLabel(issue, isWaveLabel),
     await checkWaveLabelPredatesMerge(candidate, pr, issue, isWaveLabel, deps.github),
     await checkPrClosesIssue(candidate, deps.github),
@@ -89,41 +105,143 @@ export async function verifyContribution(
 
 // --- a ---------------------------------------------------------------
 
+/**
+ * Layered:
+ *  1. live Wave source (`approvedOrgs`) — if it returns a real list,
+ *     `pass`/`fail` come from it, exactly as before, with no
+ *     `confidence` marker.
+ *  2. live source unavailable + an allowlist is configured:
+ *       - repo present  -> `pass`, `confidence: "manually-asserted-allowlist"`,
+ *         with assertedBy/assertedAt/evidenceUrl inline in `detail` and
+ *         `evidence.assertion`;
+ *       - repo absent    -> `fail`, `confidence: "operator-allowlist-absent"`
+ *         (a curated set's absence is a decisive no).
+ *  3. live source unavailable + no allowlist configured -> `indeterminate`,
+ *     unchanged from before this fallback existed.
+ *
+ * The live path is never removed or weakened — it is always tried first.
+ */
 async function checkRepoInApprovedOrgs(
-  owner: string,
-  source: ApprovedOrgsSource,
+  target: { owner: string; repo: string },
+  liveSource: ApprovedOrgsSource,
+  allowlistSource: ApprovedOrgsAllowlistSource | undefined,
 ): Promise<CheckOutcome> {
-  let snapshot;
+  const { owner } = target;
+  const ownerRepo = `${owner}/${target.repo}`.toLowerCase();
+
+  // --- 1. live Wave source (tried first, unchanged) ---
+  let liveSnapshot: ApprovedOrgsSnapshot | undefined;
+  let liveErrorMessage: string | undefined;
   try {
-    snapshot = await source.listApprovedOrgs();
+    liveSnapshot = await liveSource.listApprovedOrgs();
+  } catch (err) {
+    liveErrorMessage = (err as Error).message;
+  }
+
+  if (liveSnapshot?.status === "ok") {
+    const approved = orgIsApproved(liveSnapshot, owner);
+    return {
+      id: "repo_in_approved_orgs",
+      status: approved ? "pass" : "fail",
+      detail: approved
+        ? `${owner} is in the Wave approved-orgs list (${liveSnapshot.orgs.length} orgs)`
+        : `${owner} is not in the Wave approved-orgs list (${liveSnapshot.orgs.length} orgs)`,
+      evidence: {
+        owner,
+        source: liveSnapshot.source,
+        approvedCount: liveSnapshot.orgs.length,
+        sample: liveSnapshot.orgs.slice(0, 20),
+      },
+    };
+  }
+
+  // Live source is unavailable — capture why for the evidence trail.
+  const liveSourceStatus: "indeterminate" | "error" = liveSnapshot ? "indeterminate" : "error";
+  const liveSourceReason =
+    liveSnapshot?.status === "indeterminate"
+      ? liveSnapshot.reason
+      : `could not fetch Wave approved-orgs list: ${liveErrorMessage ?? "unknown error"}`;
+  const liveInfo = { liveSourceStatus, liveSourceReason };
+
+  // --- 3. no allowlist configured -> indeterminate (unchanged path) ---
+  if (!allowlistSource) {
+    return {
+      id: "repo_in_approved_orgs",
+      status: "indeterminate",
+      detail: liveSourceReason,
+      evidence: { owner, ...liveInfo },
+    };
+  }
+
+  // --- 2. operator-asserted allowlist fallback ---
+  let allowlist;
+  try {
+    allowlist = await allowlistSource.load();
   } catch (err) {
     return {
       id: "repo_in_approved_orgs",
       status: "indeterminate",
-      detail: `could not fetch Wave approved-orgs list: ${(err as Error).message}`,
-      evidence: { owner },
+      detail:
+        `Wave live source unavailable, and the operator allowlist is unusable: ` +
+        `${(err as Error).message}`,
+      evidence: { owner, repo: ownerRepo, allowlistError: (err as Error).message, ...liveInfo },
     };
   }
-  if (snapshot.status === "indeterminate") {
+
+  if (!allowlist) {
+    // File absent — same as "no allowlist configured".
     return {
       id: "repo_in_approved_orgs",
       status: "indeterminate",
-      detail: snapshot.reason,
-      evidence: { owner, source: snapshot.source },
+      detail: liveSourceReason,
+      evidence: { owner, ...liveInfo },
     };
   }
-  const approved = orgIsApproved(snapshot, owner);
+
+  const entry = allowlist.find(ownerRepo);
+  if (entry) {
+    return {
+      id: "repo_in_approved_orgs",
+      status: "pass",
+      confidence: "manually-asserted-allowlist",
+      detail:
+        `${ownerRepo} is on the operator-asserted approved-orgs allowlist ` +
+        `(NOT independently verified): asserted by ${entry.assertedBy} on ${entry.assertedAt}, ` +
+        `evidence ${entry.evidenceUrl}. Live Wave source was ${liveSourceStatus} ` +
+        `(${liveSourceReason}).`,
+      evidence: {
+        owner,
+        repo: ownerRepo,
+        decidedBy: "operator-allowlist",
+        allowlistSource: allowlist.source,
+        assertion: {
+          repo: entry.repo,
+          assertedBy: entry.assertedBy,
+          assertedAt: entry.assertedAt,
+          evidenceUrl: entry.evidenceUrl,
+          ...(entry.note !== undefined ? { note: entry.note } : {}),
+        },
+        ...liveInfo,
+      },
+    };
+  }
+
+  const n = allowlist.entries.length;
   return {
     id: "repo_in_approved_orgs",
-    status: approved ? "pass" : "fail",
-    detail: approved
-      ? `${owner} is in the Wave approved-orgs list (${snapshot.orgs.length} orgs)`
-      : `${owner} is not in the Wave approved-orgs list (${snapshot.orgs.length} orgs)`,
+    status: "fail",
+    confidence: "operator-allowlist-absent",
+    detail:
+      `${ownerRepo} is NOT on the operator-asserted approved-orgs allowlist ` +
+      `(${n} entr${n === 1 ? "y" : "ies"}); the live Wave source was ${liveSourceStatus} ` +
+      `(${liveSourceReason}). Absence from a curated list is a decisive no.`,
     evidence: {
       owner,
-      source: snapshot.source,
-      approvedCount: snapshot.orgs.length,
-      sample: snapshot.orgs.slice(0, 20),
+      repo: ownerRepo,
+      decidedBy: "operator-allowlist",
+      allowlistSource: allowlist.source,
+      allowlistEntryCount: n,
+      ...liveInfo,
     },
   };
 }
