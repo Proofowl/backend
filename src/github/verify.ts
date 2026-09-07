@@ -114,10 +114,12 @@ export async function verifyContribution(
  *       - repo present  -> `pass`, `confidence: "manually-asserted-allowlist"`,
  *         with assertedBy/assertedAt/evidenceUrl inline in `detail` and
  *         `evidence.assertion`;
- *       - repo absent    -> `fail`, `confidence: "operator-allowlist-absent"`
- *         (a curated set's absence is a decisive no).
- *  3. live source unavailable + no allowlist configured -> `indeterminate`,
- *     unchanged from before this fallback existed.
+ *       - repo absent    -> `indeterminate`, `confidence: "operator-allowlist-absent"`.
+ *         The allowlist is an incomplete positive list, not a denylist:
+ *         "not on it yet" means "not reviewed yet", not "rejected". The
+ *         `confidence` marker still distinguishes this from case 3.
+ *  3. live source unavailable + no allowlist configured -> `indeterminate`
+ *     (no `confidence` marker), unchanged from before this fallback existed.
  *
  * The live path is never removed or weakened — it is always tried first.
  */
@@ -229,12 +231,18 @@ async function checkRepoInApprovedOrgs(
   const n = allowlist.entries.length;
   return {
     id: "repo_in_approved_orgs",
-    status: "fail",
+    // NOT "fail": the operator allowlist is an incomplete positive list
+    // (only a handful of repos reviewed so far), not a denylist. An
+    // unlisted repo means "nobody has reviewed it yet" — the same shape
+    // of unknown as case 4 (no list at all). `confidence` still
+    // distinguishes the two.
+    status: "indeterminate",
     confidence: "operator-allowlist-absent",
     detail:
-      `${ownerRepo} is NOT on the operator-asserted approved-orgs allowlist ` +
-      `(${n} entr${n === 1 ? "y" : "ies"}); the live Wave source was ${liveSourceStatus} ` +
-      `(${liveSourceReason}). Absence from a curated list is a decisive no.`,
+      `${ownerRepo} is not yet on the operator-asserted approved-orgs allowlist ` +
+      `(${n} entr${n === 1 ? "y" : "ies"}); this does not mean the repo is rejected, only ` +
+      `that no operator has reviewed it yet. Live Wave source was ${liveSourceStatus} ` +
+      `(${liveSourceReason}).`,
     evidence: {
       owner,
       repo: ownerRepo,

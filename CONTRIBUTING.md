@@ -41,10 +41,12 @@ npm run check                # baseline must pass before you start
      from `fail`. Drive new branches from fixtures in
      `tests/github/fixtures.ts`, not live PRs. For `repo_in_approved_orgs`:
      the live Wave source is always tried first and must not be weakened;
-     any `pass`/`fail` that comes from the operator-asserted allowlist
-     fallback (`config/approved-orgs-allowlist.json`) must carry a
-     `confidence` marker and the entry's provenance in the returned
-     `evidence` — never only in a log or comment. See README "Known
+     the allowlist fallback (`config/approved-orgs-allowlist.json`) only
+     ever produces `pass` (repo asserted) or `indeterminate` (repo not
+     asserted yet) — never `fail`, since it is an incomplete positive
+     list, not a denylist — and its outcome must carry a `confidence`
+     marker and, for a `pass`, the entry's provenance in the returned
+     `evidence`, never only in a log or comment. See README "Known
      limitation: Wave-approval verification".
    - **On-chain** changes: reads only. Never add a code path that signs
      or submits a transaction in this pass. The live integration test

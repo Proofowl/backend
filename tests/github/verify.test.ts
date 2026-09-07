@@ -185,7 +185,7 @@ test("case 2: live unavailable + repo IS on the allowlist -> pass, marked manual
   assert.equal(result.indeterminate, false);
 });
 
-test("case 3: live unavailable + repo NOT on the allowlist -> decisive fail", async () => {
+test("case 3: live unavailable + repo NOT on the allowlist -> indeterminate (not yet reviewed, not rejected)", async () => {
   const result = await verifyContribution(
     { ...CANDIDATE, owner: "randouser", repo: "randorepo" },
     {
@@ -195,14 +195,24 @@ test("case 3: live unavailable + repo NOT on the allowlist -> decisive fail", as
     },
   );
   const check = getCheck(result, "repo_in_approved_orgs");
-  assert.equal(check.status, "fail");
+  assert.equal(check.status, "indeterminate");
+  // marker kept, so downstream can still tell this apart from case 4
   assert.equal(check.confidence, "operator-allowlist-absent");
-  assert.match(check.detail, /NOT on the operator-asserted approved-orgs allowlist \(1 entry\)/);
-  assert.match(check.detail, /decisive no/);
+  assert.match(
+    check.detail,
+    /not yet on the operator-asserted approved-orgs allowlist \(1 entry\)/,
+  );
+  assert.match(
+    check.detail,
+    /does not mean the repo is rejected, only that no operator has reviewed it yet/,
+  );
+  assert.doesNotMatch(check.detail, /decisive/i);
   assert.equal(check.evidence.decidedBy, "operator-allowlist");
   assert.equal(check.evidence.allowlistEntryCount, 1);
+  // the bug fix: an unlisted repo is now a "maybe", so it blocks attestable
+  // via indeterminate, not via a false rejection.
   assert.equal(result.attestable, false);
-  assert.equal(result.indeterminate, false, "a curated-list miss is a fail, not a maybe");
+  assert.equal(result.indeterminate, true, "an unreviewed repo is a maybe, not a no");
 });
 
 test("live unavailable + allowlist file present but MALFORMED -> indeterminate, loudly", async () => {

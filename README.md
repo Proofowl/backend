@@ -126,22 +126,28 @@ rejected.
 
 **The four outcomes:**
 
-| live Wave source    | allowlist                | result                                                                                       |
-| ------------------- | ------------------------ | -------------------------------------------------------------------------------------------- |
-| returns a real list | (ignored)                | `pass` / `fail` from the live list, no `confidence` marker — as today                        |
-| unavailable         | repo present             | `pass`, `confidence: "manually-asserted-allowlist"`, provenance inline                       |
-| unavailable         | repo absent              | `fail`, `confidence: "operator-allowlist-absent"` — a curated set's absence is a decisive no |
-| unavailable         | not configured (no file) | `indeterminate` — unchanged from before the fallback existed                                 |
+| live Wave source    | allowlist                | result                                                                                                                                    |
+| ------------------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| returns a real list | (ignored)                | `pass` / `fail` from the live list, no `confidence` marker — as today                                                                     |
+| unavailable         | repo present             | `pass`, `confidence: "manually-asserted-allowlist"`, provenance inline                                                                    |
+| unavailable         | repo absent              | `indeterminate`, `confidence: "operator-allowlist-absent"` — not yet reviewed, not rejected (an incomplete positive list, not a denylist) |
+| unavailable         | not configured (no file) | `indeterminate`, no `confidence` marker — unchanged from before the fallback existed                                                      |
+
+The last two rows are both `indeterminate`; the `confidence` marker is
+what tells "on a curated list that hasn't reached this repo yet" apart
+from "no curated list exists at all". Neither is a rejection — this
+check never returns `fail` from the allowlist path.
 
 **Default behaviour.** The committed seed file asserts exactly two
 repos: `proofowl/proofowl-contracts` and `proofowl/proofowl-backend`
 (asserted by this project's maintainer, `evidenceUrl` → the real
 `github.com/Proofowl` org). So out of the box, while Drips is
-unreachable, `repo_in_approved_orgs` is `pass` only for those two and
-`fail` for every other repo. An operator extends the file as they
+unreachable, `repo_in_approved_orgs` is `pass` only for those two;
+every other repo is `indeterminate` (marked `operator-allowlist-absent`)
+— not yet reviewed, not rejected. An operator extends the file as they
 verify more repos; deleting it (or pointing `APPROVED_ORGS_ALLOWLIST_PATH`
-at a non-existent path) returns the check to `indeterminate` on live
-failure.
+at a non-existent path) drops the marker but leaves the outcome
+`indeterminate` on live failure either way.
 
 ### On-chain reads
 
