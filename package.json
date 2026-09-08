@@ -30,11 +30,12 @@
     "check": "npm run format:check && npm run lint && npm run typecheck && npm run test"
   },
   "dependencies": {
-    "@proofowl/contract-sdk": "file:../proofowl-contracts/sdk/typescript",
     "@prisma/client": "^6.19.0",
+    "@proofowl/contract-sdk": "file:../proofowl-contracts/sdk/typescript",
     "@stellar/stellar-sdk": "^16.0.1",
     "dotenv": "^16.4.7",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "express-rate-limit": "^7.5.1"
   },
   "overrides": {
     "deepmerge-ts": "^8.0.0"
