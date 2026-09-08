@@ -14,15 +14,20 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
+import { Keypair } from "@stellar/stellar-sdk";
+
 import {
   submitAttestation,
   TESTNET_NETWORK_PASSPHRASE,
   MAINNET_NETWORK_PASSPHRASE,
   type AttestationSubmitter,
+  type PreparedAttestationTx,
+  type SentAttestationOutcome,
   type SubmissionAttemptContext,
   type SubmitAttestationInput,
   type SubmitAttestationDeps,
 } from "../../src/chain/submit.js";
+import { createSdkAttestationSubmitter } from "../../src/chain/attestationSubmitter.js";
 import type { AttestationRecord } from "../../src/chain/attestationDecode.js";
 import type { ChainReadClient } from "../../src/chain/readClient.js";
 import type {
@@ -311,4 +316,266 @@ test("prepare() THROWING a value that carries a contract code -> contract-reject
   assert.equal(res.errorCode, 7);
   assert.equal(res.errorName, "WalletNotLinked");
   assert.equal(attempts.length, 0);
+});
+
+// --- 3. rpc-error, submission-failed, dry-run, happy path -----------
+
+function preparedOk(over: Partial<PreparedAttestationTx> = {}): PreparedAttestationTx {
+  return {
+    simulationError: null,
+    simulatedCreditWallet: LINKED_WALLET,
+    minResourceFee: "12345",
+    send: async (): Promise<SentAttestationOutcome> => ({
+      status: "SUCCESS",
+      txHash: "abc123",
+      ledger: 999,
+      creditedWallet: LINKED_WALLET,
+      detail: null,
+    }),
+    ...over,
+  };
+}
+
+test("a network failure reading the wallet link -> rpc-error (during wallet-link-read)", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads({
+      getWalletForGithubIdHash: async () => {
+        throw new Error("fetch failed");
+      },
+    }),
+    submitter: submitter(PREPARE_MUST_NOT_BE_CALLED),
+  });
+  assert.equal(res.kind, "rpc-error");
+  assert.equal(res.kind === "rpc-error" && res.during, "wallet-link-read");
+});
+
+test("a network failure on the already-attested read -> rpc-error (during already-attested-read)", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads({
+      isContributionAlreadyAttested: async () => {
+        throw new Error("getaddrinfo ENOTFOUND soroban-testnet.stellar.org");
+      },
+    }),
+    submitter: submitter(PREPARE_MUST_NOT_BE_CALLED),
+  });
+  assert.equal(res.kind, "rpc-error");
+  assert.equal(res.kind === "rpc-error" && res.during, "already-attested-read");
+});
+
+test("prepare() rejecting with a transport error -> rpc-error (during prepare)", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads(),
+    submitter: submitter(async () => {
+      throw new Error("UND_ERR_CONNECT_TIMEOUT");
+    }),
+  });
+  assert.equal(res.kind, "rpc-error");
+  assert.equal(res.kind === "rpc-error" && res.during, "prepare");
+});
+
+test("dryRun: a clean simulation -> dry-run-ok, nothing sent, no attempt counted", async () => {
+  const { deps, attempts } = withAttemptSpy({
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => {
+          throw new Error("send() must not run for a dry run");
+        },
+      }),
+    ),
+  });
+  const res = await submitAttestation(baseInput({ dryRun: true }), deps);
+  assert.equal(res.kind, "dry-run-ok");
+  if (res.kind !== "dry-run-ok") return;
+  assert.equal(res.simulatedCreditWallet, LINKED_WALLET);
+  assert.equal(res.minResourceFee, "12345");
+  assert.equal(res.prHashHex, PR_HASH_HEX);
+  assert.equal(res.repo, "proofowl/backend-integration-test");
+  assert.equal(attempts.length, 0);
+});
+
+test("dryRun still surfaces a contract rejection instead of dry-run-ok", async () => {
+  const res = await submitAttestation(baseInput({ dryRun: true }), {
+    reads: fakeReads(),
+    submitter: submitter(preparedSimError("HostError: Error(Contract, #6)")),
+  });
+  assert.equal(res.kind, "contract-rejected");
+  assert.equal(res.kind === "contract-rejected" && res.errorName, "DuplicateAttestation");
+});
+
+test("happy path: submitted, onSubmissionAttempt fired exactly once with the derived pr_hash", async () => {
+  const { deps, attempts } = withAttemptSpy({
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => ({
+          status: "SUCCESS",
+          txHash: "cafef00d",
+          ledger: 4_600_000,
+          creditedWallet: LINKED_WALLET,
+          detail: null,
+        }),
+      }),
+    ),
+  });
+  const res = await submitAttestation(baseInput(), deps);
+  assert.equal(res.kind, "submitted");
+  if (res.kind !== "submitted") return;
+  assert.equal(res.txHash, "cafef00d");
+  assert.equal(res.ledger, 4_600_000);
+  assert.equal(res.creditedWallet, LINKED_WALLET);
+  assert.equal(res.complexity, 100);
+  assert.equal(res.repo, "proofowl/backend-integration-test");
+  assert.equal(res.prNumber, 4242);
+  assert.equal(res.prHashHex, PR_HASH_HEX);
+  assert.equal(attempts.length, 1);
+  assert.equal(attempts[0]?.prHashHex, PR_HASH_HEX);
+  assert.equal(attempts[0]?.prNumber, 4242);
+  assert.equal(attempts[0]?.repo, "proofowl/backend-integration-test");
+});
+
+test("send reports ERROR (rejected at submission) -> submission-failed, stage 'send', attempt still counted", async () => {
+  const { deps, attempts } = withAttemptSpy({
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => ({
+          status: "ERROR",
+          txHash: "e11",
+          ledger: null,
+          creditedWallet: null,
+          detail: "rejected at submission (errorResultXdr: AAAA)",
+        }),
+      }),
+    ),
+  });
+  const res = await submitAttestation(baseInput(), deps);
+  assert.equal(res.kind, "submission-failed");
+  if (res.kind !== "submission-failed") return;
+  assert.equal(res.stage, "send");
+  assert.equal(res.status, "ERROR");
+  assert.equal(res.txHash, "e11");
+  assert.equal(attempts.length, 1, "a spent submission attempt is still counted");
+});
+
+test("send reports FAILED (failed after inclusion) -> submission-failed, stage 'confirm'", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => ({
+          status: "FAILED",
+          txHash: "f22",
+          ledger: 4_600_001,
+          creditedWallet: null,
+          detail: "transaction failed after inclusion",
+        }),
+      }),
+    ),
+  });
+  assert.equal(res.kind, "submission-failed");
+  assert.equal(res.kind === "submission-failed" && res.stage, "confirm");
+  assert.equal(res.kind === "submission-failed" && res.txHash, "f22");
+});
+
+test("send reports NOT_FOUND (unconfirmed) -> submission-failed, stage 'confirm'", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => ({
+          status: "NOT_FOUND",
+          txHash: "n33",
+          ledger: null,
+          creditedWallet: null,
+          detail: "transaction not confirmed within the client wait window",
+        }),
+      }),
+    ),
+  });
+  assert.equal(res.kind, "submission-failed");
+  assert.equal(res.kind === "submission-failed" && res.stage, "confirm");
+  assert.equal(res.kind === "submission-failed" && res.status, "NOT_FOUND");
+});
+
+test("send() THROWING a transport error -> rpc-error (during send), attempt still counted", async () => {
+  const { deps, attempts } = withAttemptSpy({
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => {
+          throw new Error("socket hang up");
+        },
+      }),
+    ),
+  });
+  const res = await submitAttestation(baseInput(), deps);
+  assert.equal(res.kind, "rpc-error");
+  assert.equal(res.kind === "rpc-error" && res.during, "send");
+  assert.equal(attempts.length, 1);
+});
+
+test("send() THROWING a non-transport error -> submission-failed, status 'threw'", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads(),
+    submitter: submitter(async () =>
+      preparedOk({
+        send: async () => {
+          throw new Error("unexpected internal boom");
+        },
+      }),
+    ),
+  });
+  assert.equal(res.kind, "submission-failed");
+  assert.equal(res.kind === "submission-failed" && res.status, "threw");
+  assert.equal(res.kind === "submission-failed" && res.stage, "send");
+});
+
+// --- 4. SDK submitter local guards (no network) --------------------
+
+const TESTNET_CONFIG = {
+  contractId: "CAIDTSVPQICTA2VLE6BSQYHEELHGPZWQDYWKSDBRW4LYPZH6Q44UTAOA",
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  networkPassphrase: TESTNET_NETWORK_PASSPHRASE,
+  allowHttp: false,
+};
+
+test("createSdkAttestationSubmitter refuses a mainnet config", () => {
+  assert.throws(
+    () =>
+      createSdkAttestationSubmitter(
+        { ...TESTNET_CONFIG, networkPassphrase: MAINNET_NETWORK_PASSPHRASE },
+        Keypair.random().secret(),
+      ),
+    /mainnet/i,
+  );
+});
+
+test("createSdkAttestationSubmitter refuses an unconfirmed network config", () => {
+  assert.throws(
+    () =>
+      createSdkAttestationSubmitter(
+        { ...TESTNET_CONFIG, networkPassphrase: "Nope ; 2019" },
+        Keypair.random().secret(),
+      ),
+    /not the confirmed|unconfirmed network/i,
+  );
+});
+
+test("createSdkAttestationSubmitter rejects a malformed secret key without echoing it", () => {
+  const bad = "S-definitely-not-a-real-key-000000000000000000";
+  try {
+    createSdkAttestationSubmitter(TESTNET_CONFIG, bad);
+    assert.fail("expected a throw");
+  } catch (err) {
+    const msg = (err as Error).message;
+    assert.equal(msg, "ATTESTOR_SECRET_KEY is not a valid Stellar secret key");
+    assert.ok(!msg.includes(bad), "the invalid key value must not appear in the error");
+  }
+});
+
+test("createSdkAttestationSubmitter with a testnet config + throwaway key reports the testnet network", () => {
+  const s = createSdkAttestationSubmitter(TESTNET_CONFIG, Keypair.random().secret());
+  assert.equal(s.network, TESTNET_NETWORK_PASSPHRASE);
+  assert.equal(typeof s.prepare, "function");
 });
