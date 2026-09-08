@@ -2,29 +2,38 @@
 
 The verification service for **ProofOwl**. It checks GitHub's public API
 for merged [Stellar Wave](https://drips.network/wave/stellar)
-contributions and — in a later pass — submits them as on-chain
-attestations to the already-deployed
+contributions and submits them as on-chain attestations to the
+already-deployed
 [`proofowl-contracts`](https://github.com/Proofowl/proofowl-contracts)
-registry.
+registry. The submission call and its safeguards exist now
+([below](#submitting-attestations)); the loop that drives it
+automatically is still a later pass.
 
 ## What this repo does NOT do yet
 
-This is a **scaffold**, not a running service. In this pass it does not:
+This is close to a **scaffold**, not yet a running service. In this pass
+it does not:
 
 - **poll GitHub** on a loop or on a schedule — there is no ingestion
   worker;
-- **submit any attestation** — no transaction is signed or sent to any
-  contract, on any network; the on-chain integration here is **read-only
-  simulation** only;
+- **submit attestations automatically** — `submitAttestation`
+  (`src/chain/submit.ts`) is built, guarded, and covered, but nothing
+  calls it on a schedule. A submission is a deliberate one-off
+  invocation (or the opt-in integration test), it is **testnet-only**,
+  and it refuses any other network;
 - **expose a REST API** for the frontend — the Express app serves only
   `/health` and `/ready`;
-- **link wallets**, run the OAuth/challenge flow, or hold an attestor
-  key — there is no attestor secret anywhere in this repo (see
-  [`.env.example`](./.env.example)).
+- **run the wallet-linking OAuth/challenge flow** — the submit path
+  assumes the contributor's wallet is already linked on-chain and
+  short-circuits to "needs queueing" when it is not. The attestor secret
+  is read from `ATTESTOR_SECRET_KEY` in the environment at submit time;
+  it is never committed — [`.env.example`](./.env.example) ships a fake
+  placeholder.
 
 What it _does_ provide: the project structure, the canonical hashing
-module, the GitHub verification logic, read-only on-chain integration via
-the contracts SDK, a one-table local queue, tests, and CI.
+module, the GitHub verification logic, on-chain reads via the contracts
+SDK, the testnet attestation-submission call with its safeguards, a
+one-table local queue, tests, and CI.
 
 ## How it fits together
 
@@ -33,7 +42,8 @@ the contracts SDK, a one-table local queue, tests, and CI.
  (PRs, issues,          - canonical hashing    - wallet ↔ github_id_hash links
   timeline, closing     - 5 verification checks - one attestation per merged PR
   issue links)          - self-merge flag       - reputation score
-                        - on-chain READS        (this repo never writes to it yet)
+                        - on-chain READS
+                        - submit_attestation    (testnet only, no loop yet)
                         - queue of verified-
                           but-unlinked contribs
                                 │
@@ -49,13 +59,13 @@ that repo's `sdk/typescript` package as a dependency and its
 
 ## Modules
 
-| Path           | What it is                                                                                                                                                                                                |
-| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/hashing/` | `github_id_hash` / `pr_hash` per `identifier-spec-v1` — an independent implementation, cross-checked against the contracts SDK and the spec's published vectors.                                          |
-| `src/github/`  | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` / `ApprovedOrgsAllowlistSource` are interfaces (fixtures in tests).    |
-| `src/chain/`   | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. |
-| `src/queue/`   | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                            |
-| `src/app.ts`   | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                       |
+| Path           | What it is                                                                                                                                                                                                                                                                                                                                                 |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/hashing/` | `github_id_hash` / `pr_hash` per `identifier-spec-v1` — an independent implementation, cross-checked against the contracts SDK and the spec's published vectors.                                                                                                                                                                                           |
+| `src/github/`  | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` / `ApprovedOrgsAllowlistSource` are interfaces (fixtures in tests).                                                                                                                                                     |
+| `src/chain/`   | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. Plus `submitAttestation(...)` ([below](#submitting-attestations)) — the one mutating call: testnet-only, dry-run-first, two hard pre-conditions. |
+| `src/queue/`   | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                                                                                                                                                                             |
+| `src/app.ts`   | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                                                                                                                                                                        |
 
 ### The five verification checks
 
@@ -165,6 +175,76 @@ struct from the live v0.3 contract, so the SDK's generated client still
 does the RPC round-trip and the shim only replaces the final
 ScVal→JS step with the generic `scValToNative`. Remove it once the SDK
 bumps `@stellar/stellar-sdk`.
+
+### Submitting attestations
+
+`submitAttestation(input, deps)` (`src/chain/submit.ts`) turns one
+verified, **attestable** contribution into a real `submit_attestation`
+call on the v0.3 registry — the only state-changing path in this repo.
+It assembles no transaction by hand: it drives `@proofowl/contract-sdk`'s
+`prepareSubmitAttestation` through an injected `AttestationSubmitter`
+(`createSdkAttestationSubmitter`, which signs with `ATTESTOR_SECRET_KEY`).
+
+**Safeguards — enforced, not just documented:**
+
+- **Testnet only.** `createSdkAttestationSubmitter` refuses to construct
+  unless the config's network passphrase is the Stellar testnet one —
+  mainnet is refused by name, anything else as "unconfirmed".
+  `submitAttestation` re-checks before any I/O.
+- **Dry-run first, always.** Every call is simulated before it can be
+  sent; a contract rejection is classified from that simulation, before
+  any signature or fee. `dryRun: true` stops there.
+- **Two hard pre-conditions, re-read live on every call:**
+  - _not-linked_ — `get_wallet_for_github` returns `null` ⇒ the identity
+    has no wallet to credit ⇒ result `not-submittable`
+    (`reason: "wallet-not-linked"`). That is the queue's job, not an
+    error.
+  - _already-attested_ — `isContributionAlreadyAttested` reports the PR
+    is already credited ⇒ result `already-attested` and **no transaction
+    is assembled**. It is never "submitted anyway to be sure".
+- **The attestor secret is never logged** — not in a result, an error,
+  or a log line. A malformed key yields a fixed message that does not
+  contain the value. It is also kept off the shared `AppConfig` object
+  (only the boolean `attestorSecretKeyIsSet` is exposed).
+- **No loop.** This is the submission function and its safeguards only.
+  The scheduler that calls it is a separate, later task.
+
+**Result — exactly one of (`SubmitAttestationResult.kind`):**
+
+| kind                | meaning                                                                                                                                                                                               |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `submitted`         | recorded on-chain; carries `txHash`, `ledger`, `creditedWallet`                                                                                                                                       |
+| `dry-run-ok`        | `dryRun: true` and the simulation was clean; nothing was sent                                                                                                                                         |
+| `already-attested`  | pre-condition hit; the matching on-chain record is returned, no tx assembled                                                                                                                          |
+| `not-submittable`   | identity not linked to a wallet — enqueue and retry once it is                                                                                                                                        |
+| `not-attestable`    | the verification result handed in was not `attestable` (defensive guard)                                                                                                                              |
+| `contract-rejected` | the contract rejected the **simulation**; `errorName` / `errorCode` distinguish `WalletNotLinked`, `DuplicateAttestation`, `InvalidComplexity`, … — no signature spent                                |
+| `submission-failed` | signed and sent, then failed: `stage: "send"` (rejected at submission — bad sequence number, insufficient fee) or `stage: "confirm"` (failed, or unconfirmed within the wait window, after inclusion) |
+| `rpc-error`         | transport failure — no verdict from the contract, safe to retry; `during` says where it happened                                                                                                      |
+
+`deps.onSubmissionAttempt` fires exactly once immediately before every
+real (non-dry-run) send, successful or not — the hook a caller uses to
+count submissions against a budget.
+
+The offline unit tests (`tests/chain/submit.test.ts`) cover every `kind`
+against fakes for both boundaries. One opt-in integration test
+(`tests/chain/submitAttestation.integration.test.ts`, gated on
+`PROOFOWL_INTEGRATION=1` **and** `ATTESTOR_SECRET_KEY`) exercises the
+whole path once against the live v0.3 testnet instance: link → dry-run →
+submit → read-back → duplicate refusal.
+
+### Transaction budget (historical note)
+
+The task that built this module operated under a hard cap of **3 real
+testnet transactions total**, across all development and the demo, and
+used **2**: one `link_github` and one `submit_attestation` in the
+integration test. The duplicate-refusal check consumed none — it is
+rejected before a transaction is assembled. This cap was a
+development-time discipline for that task (treating "how many times did
+this write" as worth counting even where nothing is at stake). It is
+**not** a permanent runtime rule: once the scheduling loop exists it will
+submit as often as there are verified, linked, un-attested
+contributions.
 
 ## Setup
 
