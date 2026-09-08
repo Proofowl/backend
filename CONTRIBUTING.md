@@ -48,10 +48,16 @@ npm run check                # baseline must pass before you start
      marker and, for a `pass`, the entry's provenance in the returned
      `evidence`, never only in a log or comment. See README "Known
      limitation: Wave-approval verification".
-   - **On-chain** changes: reads only. Never add a code path that signs
-     or submits a transaction in this pass. The live integration test
-     (`tests/chain/testnet.integration.test.ts`) is opt-in via
-     `PROOFOWL_INTEGRATION=1`.
+   - **On-chain** changes: reads are plain simulations. The one
+     state-changing path is `submitAttestation` (`src/chain/submit.ts`) —
+     it is **testnet-only** (refused on any other network), simulates
+     before it can send, and short-circuits on the not-linked /
+     already-attested pre-conditions. Do not add a second signing path,
+     a mainnet code path, or a scheduler that calls it. The live
+     integration tests (`tests/chain/testnet.integration.test.ts`,
+     `tests/chain/submitAttestation.integration.test.ts`) are opt-in via
+     `PROOFOWL_INTEGRATION=1`; the submit one also needs
+     `ATTESTOR_SECRET_KEY`.
    - **Schema** changes: edit `prisma/schema.prisma`, run
      `npx prisma migrate dev --name <change>`, and commit the generated
      migration under `prisma/migrations/`.
@@ -67,8 +73,11 @@ single quotes; flat ESLint config). `npm run format` fixes formatting.
 
 ## What not to commit
 
-- No real secrets. `ATTESTOR_SECRET_KEY` is reserved and unused; keep the
-  placeholder in `.env.example` deliberately invalid.
+- No real secrets. `ATTESTOR_SECRET_KEY` is now read by the testnet
+  submitter (`src/chain/attestationSubmitter.ts`) and the submit
+  integration test, but only from a local git-ignored `.env` — keep the
+  placeholder in `.env.example` deliberately invalid, and never let the
+  value reach a log or a committed file.
 - No `.env`, no `*.db` files, no generated Prisma client (all
   `.gitignore`d).
 - No AI/assistant attribution or co-author trailers in commit messages.
