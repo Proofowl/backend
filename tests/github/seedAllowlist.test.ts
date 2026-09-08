@@ -33,7 +33,7 @@ test("the committed seed allowlist parses and holds the two seed entries", async
 
   assert.ok(list, "seed file must exist and parse");
   assert.deepEqual(list.entries.map((e) => e.repo).sort(), [
-    "proofowl/proofowl-backend",
+    "proofowl/backend",
     "proofowl/proofowl-contracts",
   ]);
 

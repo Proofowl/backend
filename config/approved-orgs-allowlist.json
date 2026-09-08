@@ -9,11 +9,11 @@
       "note": "This project's own on-chain registry contract repository, in the Proofowl GitHub org the asserting maintainer controls. Seed entry, not a Wave-approved third-party contribution."
     },
     {
-      "repo": "proofowl/proofowl-backend",
+      "repo": "proofowl/backend",
       "assertedBy": "akerityonoah (proofowl-backend maintainer)",
-      "assertedAt": "2026-09-07",
-      "evidenceUrl": "https://github.com/Proofowl",
-      "note": "This repository. Its GitHub remote is Proofowl/backend; the 'proofowl/proofowl-backend' key matches the local project name. Seed entry asserted by its own maintainer, not a Wave approval."
+      "assertedAt": "2026-09-09",
+      "evidenceUrl": "https://github.com/Proofowl/backend",
+      "note": "This repository, at its real GitHub path Proofowl/backend (the local folder is 'proofowl-backend'; the earlier seed entry used 'proofowl/proofowl-backend' which does not resolve). Corrected so pipeline discovery and repo_in_approved_orgs both target the real repo. Seed entry asserted by its own maintainer, not a Wave approval."
     }
   ]
 }
