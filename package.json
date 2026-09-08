@@ -18,6 +18,8 @@
     "format:check": "prettier --check .",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
+    "pipeline:once": "tsx src/pipeline/main.ts once",
+    "pipeline:loop": "tsx src/pipeline/main.ts loop",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "postinstall": "prisma generate",
