@@ -12,6 +12,25 @@
 import { NotFoundError, UpstreamError } from "../lib/errors.js";
 import type { GitHubIssue, GitHubLabeledEvent, GitHubPullRequest } from "./types.js";
 
+/** Options for {@link GitHubClient.listRepoIssues}. */
+export interface ListRepoIssuesOptions {
+  /** `"closed"` (default), `"open"`, or `"all"`. */
+  state?: "open" | "closed" | "all";
+  /**
+   * Coarse server-side label prefilter (GitHub `labels=` — comma-joined,
+   * AND-matched, exact names only). Omit for "no server filter". The
+   * caller still applies its own (possibly permissive) matcher to the
+   * result — this only bounds how many pages come back.
+   */
+  labels?: string[];
+  /**
+   * Hard ceiling on issues fetched for this repo in this call. Pagination
+   * stops once this many rows are collected; the result is sliced to it.
+   * Bounds both API cost and rate-limit pressure. Default 100.
+   */
+  maxIssues?: number;
+}
+
 export interface GitHubClient {
   getPullRequest(owner: string, repo: string, prNumber: number): Promise<GitHubPullRequest>;
   getIssue(owner: string, repo: string, issueNumber: number): Promise<GitHubIssue>;
@@ -27,6 +46,18 @@ export interface GitHubClient {
    * Uses the GraphQL `closingIssuesReferences` connection.
    */
   getClosingIssueNumbers(owner: string, repo: string, prNumber: number): Promise<number[]>;
+  /**
+   * Repository issues (never pull requests — those are filtered out),
+   * newest first, following `Link: rel="next"` pagination up to
+   * {@link ListRepoIssuesOptions.maxIssues}. Read-only; the discovery
+   * pass uses this to find closed Wave issues without hand-rolling a
+   * fetch.
+   */
+  listRepoIssues(
+    owner: string,
+    repo: string,
+    options?: ListRepoIssuesOptions,
+  ): Promise<GitHubIssue[]>;
 }
 
 export interface HttpGitHubClientOptions {
@@ -78,8 +109,13 @@ export class HttpGitHubClient implements GitHubClient {
     return (await res.json()) as T;
   }
 
-  /** Follow RFC 5988 `Link: rel="next"` pagination to completion. */
-  private async getJsonPaged<T>(path: string): Promise<T[]> {
+  /**
+   * Follow RFC 5988 `Link: rel="next"` pagination. Stops early once
+   * `maxItems` rows have been collected (the last page is still taken
+   * whole, then the result is sliced); omit `maxItems` to page to
+   * completion.
+   */
+  private async getJsonPaged<T>(path: string, maxItems?: number): Promise<T[]> {
     const out: T[] = [];
     let url: string | null = `${this.base}${path}${path.includes("?") ? "&" : "?"}per_page=100`;
     while (url) {
@@ -95,6 +131,7 @@ export class HttpGitHubClient implements GitHubClient {
       }
       const page = (await res.json()) as T[];
       out.push(...page);
+      if (maxItems !== undefined && out.length >= maxItems) return out.slice(0, maxItems);
       url = nextLink(res.headers.get("link"));
     }
     return out;
@@ -117,6 +154,25 @@ export class HttpGitHubClient implements GitHubClient {
       `/repos/${enc(owner)}/${enc(repo)}/issues/${issueNumber}/timeline`,
     );
     return events.filter((e) => e.event === "labeled");
+  }
+
+  async listRepoIssues(
+    owner: string,
+    repo: string,
+    options: ListRepoIssuesOptions = {},
+  ): Promise<GitHubIssue[]> {
+    const state = options.state ?? "closed";
+    const maxIssues = options.maxIssues ?? 100;
+    const params = new URLSearchParams({ state, sort: "updated", direction: "desc" });
+    if (options.labels && options.labels.length > 0) {
+      params.set("labels", options.labels.join(","));
+    }
+    const rows = await this.getJsonPaged<GitHubIssue>(
+      `/repos/${enc(owner)}/${enc(repo)}/issues?${params.toString()}`,
+      maxIssues,
+    );
+    // The issues endpoint returns PRs too; the caller only wants issues.
+    return rows.filter((r) => r.pull_request === undefined);
   }
 
   async getClosingIssueNumbers(owner: string, repo: string, prNumber: number): Promise<number[]> {

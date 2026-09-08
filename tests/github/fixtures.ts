@@ -54,6 +54,8 @@ export interface FakeGitHubOptions {
   issue?: GitHubIssue;
   labeledEvents?: GitHubLabeledEvent[];
   closingIssueNumbers?: number[];
+  /** Issues returned by `listRepoIssues` (defaults to `[issue]`). */
+  repoIssues?: GitHubIssue[];
   /** Make a specific method throw, to exercise the indeterminate branches. */
   throwOn?: Partial<Record<keyof GitHubClient, Error>>;
 }
@@ -64,6 +66,7 @@ export function fakeGitHubClient(opts: FakeGitHubOptions = {}): GitHubClient {
   const issue = opts.issue ?? waveIssue();
   const events = opts.labeledEvents ?? [labeledEvent("Wave", "2026-02-01T09:00:00Z")];
   const closing = opts.closingIssueNumbers ?? [issue.number];
+  const repoIssues = opts.repoIssues ?? [issue];
   const maybeThrow = (m: keyof GitHubClient) => {
     const e = opts.throwOn?.[m];
     if (e) throw e;
@@ -84,6 +87,10 @@ export function fakeGitHubClient(opts: FakeGitHubOptions = {}): GitHubClient {
     async getClosingIssueNumbers() {
       maybeThrow("getClosingIssueNumbers");
       return closing;
+    },
+    async listRepoIssues() {
+      maybeThrow("listRepoIssues");
+      return repoIssues;
     },
   };
 }
