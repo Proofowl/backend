@@ -1,6 +1,12 @@
 /**
- * On-chain read integration. Read-only simulations against the deployed
- * ProofOwl registry via @proofowl/contract-sdk. No mutating calls.
+ * On-chain integration against the deployed ProofOwl registry via
+ * @proofowl/contract-sdk.
+ *
+ * Reads (`createChainModule` / `createChainReadClient`) are read-only
+ * simulations. The write path — `submitAttestation` and its
+ * testnet-guarded `createSdkAttestationSubmitter` — is re-exported here
+ * too (see ./submit.ts); it is the ONLY mutating call in this repo, it
+ * is testnet-only, and it is not wired to any scheduler.
  */
 
 import type { ChainConfig } from "../config.js";
@@ -9,6 +15,8 @@ import { createChainReadClient, type ChainReadClient } from "./readClient.js";
 
 export * from "./attestationDecode.js";
 export * from "./readClient.js";
+export * from "./submit.js";
+export * from "./attestationSubmitter.js";
 
 export function chainConfigToSdkConfig(cfg: ChainConfig): ProofOwlContractConfig {
   return {
