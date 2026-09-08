@@ -12,6 +12,25 @@
 import { NotFoundError, UpstreamError } from "../lib/errors.js";
 import type { GitHubIssue, GitHubLabeledEvent, GitHubPullRequest } from "./types.js";
 
+/** Options for {@link GitHubClient.listRepoIssues}. */
+export interface ListRepoIssuesOptions {
+  /** `"closed"` (default), `"open"`, or `"all"`. */
+  state?: "open" | "closed" | "all";
+  /**
+   * Coarse server-side label prefilter (GitHub `labels=` — comma-joined,
+   * AND-matched, exact names only). Omit for "no server filter". The
+   * caller still applies its own (possibly permissive) matcher to the
+   * result — this only bounds how many pages come back.
+   */
+  labels?: string[];
+  /**
+   * Hard ceiling on issues fetched for this repo in this call. Pagination
+   * stops once this many rows are collected; the result is sliced to it.
+   * Bounds both API cost and rate-limit pressure. Default 100.
+   */
+  maxIssues?: number;
+}
+
 export interface GitHubClient {
   getPullRequest(owner: string, repo: string, prNumber: number): Promise<GitHubPullRequest>;
   getIssue(owner: string, repo: string, issueNumber: number): Promise<GitHubIssue>;
@@ -27,6 +46,35 @@ export interface GitHubClient {
    * Uses the GraphQL `closingIssuesReferences` connection.
    */
   getClosingIssueNumbers(owner: string, repo: string, prNumber: number): Promise<number[]>;
+  /**
+   * Repository issues (never pull requests — those are filtered out),
+   * newest first, following `Link: rel="next"` pagination up to
+   * {@link ListRepoIssuesOptions.maxIssues}. Read-only; the discovery
+   * pass uses this to find closed Wave issues without hand-rolling a
+   * fetch.
+   */
+  listRepoIssues(
+    owner: string,
+    repo: string,
+    options?: ListRepoIssuesOptions,
+  ): Promise<GitHubIssue[]>;
+  /**
+   * Pull requests linked to an issue via GitHub's own closing-issue
+   * mechanism — the inverse of {@link getClosingIssueNumbers}. Uses the
+   * GraphQL `closedByPullRequestsReferences` connection (closed PRs
+   * included), returning each linked PR's number and whether it merged.
+   */
+  getIssueLinkedPullRequests(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+  ): Promise<LinkedPullRequest[]>;
+}
+
+/** One pull request linked to an issue (see {@link GitHubClient.getIssueLinkedPullRequests}). */
+export interface LinkedPullRequest {
+  number: number;
+  merged: boolean;
 }
 
 export interface HttpGitHubClientOptions {
@@ -78,8 +126,13 @@ export class HttpGitHubClient implements GitHubClient {
     return (await res.json()) as T;
   }
 
-  /** Follow RFC 5988 `Link: rel="next"` pagination to completion. */
-  private async getJsonPaged<T>(path: string): Promise<T[]> {
+  /**
+   * Follow RFC 5988 `Link: rel="next"` pagination. Stops early once
+   * `maxItems` rows have been collected (the last page is still taken
+   * whole, then the result is sliced); omit `maxItems` to page to
+   * completion.
+   */
+  private async getJsonPaged<T>(path: string, maxItems?: number): Promise<T[]> {
     const out: T[] = [];
     let url: string | null = `${this.base}${path}${path.includes("?") ? "&" : "?"}per_page=100`;
     while (url) {
@@ -95,6 +148,7 @@ export class HttpGitHubClient implements GitHubClient {
       }
       const page = (await res.json()) as T[];
       out.push(...page);
+      if (maxItems !== undefined && out.length >= maxItems) return out.slice(0, maxItems);
       url = nextLink(res.headers.get("link"));
     }
     return out;
@@ -119,6 +173,47 @@ export class HttpGitHubClient implements GitHubClient {
     return events.filter((e) => e.event === "labeled");
   }
 
+  async listRepoIssues(
+    owner: string,
+    repo: string,
+    options: ListRepoIssuesOptions = {},
+  ): Promise<GitHubIssue[]> {
+    const state = options.state ?? "closed";
+    const maxIssues = options.maxIssues ?? 100;
+    const params = new URLSearchParams({ state, sort: "updated", direction: "desc" });
+    if (options.labels && options.labels.length > 0) {
+      params.set("labels", options.labels.join(","));
+    }
+    const rows = await this.getJsonPaged<GitHubIssue>(
+      `/repos/${enc(owner)}/${enc(repo)}/issues?${params.toString()}`,
+      maxIssues,
+    );
+    // The issues endpoint returns PRs too; the caller only wants issues.
+    return rows.filter((r) => r.pull_request === undefined);
+  }
+
+  /** POST one GraphQL query, unwrap `data`, and turn transport / `errors` into `UpstreamError`. */
+  private async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.graphqlUrl, {
+        method: "POST",
+        headers: this.headers({ "content-type": "application/json" }),
+        body: JSON.stringify({ query, variables }),
+      });
+    } catch (err) {
+      throw new UpstreamError("GitHub GraphQL request failed", err);
+    }
+    if (!res.ok) {
+      throw new UpstreamError(`GitHub GraphQL ${res.status}: ${await safeText(res)}`);
+    }
+    const body = (await res.json()) as { errors?: unknown[]; data?: T };
+    if (body.errors?.length) {
+      throw new UpstreamError(`GitHub GraphQL errors: ${JSON.stringify(body.errors)}`);
+    }
+    return (body.data ?? ({} as T)) as T;
+  }
+
   async getClosingIssueNumbers(owner: string, repo: string, prNumber: number): Promise<number[]> {
     const query = `
       query ($owner: String!, $repo: String!, $pr: Int!) {
@@ -128,32 +223,41 @@ export class HttpGitHubClient implements GitHubClient {
           }
         }
       }`;
-    let res: Response;
-    try {
-      res = await this.fetchImpl(this.graphqlUrl, {
-        method: "POST",
-        headers: this.headers({ "content-type": "application/json" }),
-        body: JSON.stringify({ query, variables: { owner, repo, pr: prNumber } }),
-      });
-    } catch (err) {
-      throw new UpstreamError("GitHub GraphQL request failed", err);
-    }
-    if (!res.ok) {
-      throw new UpstreamError(`GitHub GraphQL ${res.status}: ${await safeText(res)}`);
-    }
-    const body = (await res.json()) as {
-      errors?: unknown[];
-      data?: {
-        repository?: {
-          pullRequest?: { closingIssuesReferences?: { nodes?: Array<{ number: number }> } };
+    const data = await this.graphql<{
+      repository?: {
+        pullRequest?: { closingIssuesReferences?: { nodes?: Array<{ number: number }> } };
+      };
+    }>(query, { owner, repo, pr: prNumber });
+    const nodes = data.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
+    return nodes.map((n) => n.number);
+  }
+
+  async getIssueLinkedPullRequests(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+  ): Promise<LinkedPullRequest[]> {
+    const query = `
+      query ($owner: String!, $repo: String!, $issue: Int!) {
+        repository(owner: $owner, name: $repo) {
+          issue(number: $issue) {
+            closedByPullRequestsReferences(first: 50, includeClosedPrs: true) {
+              nodes { number merged }
+            }
+          }
+        }
+      }`;
+    const data = await this.graphql<{
+      repository?: {
+        issue?: {
+          closedByPullRequestsReferences?: {
+            nodes?: Array<{ number: number; merged: boolean }>;
+          };
         };
       };
-    };
-    if (body.errors?.length) {
-      throw new UpstreamError(`GitHub GraphQL errors: ${JSON.stringify(body.errors)}`);
-    }
-    const nodes = body.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
-    return nodes.map((n) => n.number);
+    }>(query, { owner, repo, issue: issueNumber });
+    const nodes = data.repository?.issue?.closedByPullRequestsReferences?.nodes ?? [];
+    return nodes.map((n) => ({ number: n.number, merged: n.merged === true }));
   }
 }
 
