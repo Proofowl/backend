@@ -322,12 +322,14 @@ The task that built this module operated under a hard cap of **3 real
 testnet transactions total**, across all development and the demo, and
 used **2**: one `link_github` and one `submit_attestation` in the
 integration test. The duplicate-refusal check consumed none — it is
-rejected before a transaction is assembled. This cap was a
-development-time discipline for that task (treating "how many times did
-this write" as worth counting even where nothing is at stake). It is
-**not** a permanent runtime rule: the scheduling loop
-([below](#the-automation-pipeline)) submits as often as there are
-verified, linked, un-attested contributions.
+rejected before a transaction is assembled. The later end-to-end demo
+([below](#end-to-end-demo)) made **2 more** (again 1 `link_github` +
+1 `submit_attestation`), for **4** real testnet transactions across the
+project's whole history. These caps were a development-time discipline
+(treating "how many times did this write" as worth counting even where
+nothing is at stake). They are **not** a permanent runtime rule: the
+scheduling loop ([below](#the-automation-pipeline)) submits as often as
+there are verified, linked, un-attested contributions.
 
 ## The automation pipeline
 
@@ -413,6 +415,21 @@ unlinked synthetic contribution (0 tx), a real `link_github` follows
 (1 tx), pass #2 drains the queue and submits it (1 tx), the record is
 read back on-chain, and a pass #3 confirms everything is now
 `already-attested` (0 tx) — **2 real transactions total.**
+
+## End-to-end demo
+
+[`docs/testnet/e2e-demo.md`](./docs/testnet/e2e-demo.md) is a stand-alone
+record of the full chain run once against real systems: a real merged
+GitHub PR ([`Proofowl/backend#5`](https://github.com/Proofowl/backend/pull/5),
+closing [`#4`](https://github.com/Proofowl/backend/issues/4))
+**discovered live** by the pipeline, verified against real GitHub data
+(all five gating checks pass; the self-merge flag is observed `true` in
+the wild without blocking), queued while unlinked (0 tx), then — after a
+real two-party `link_github` (tx `fea4a804…`) — submitted by the
+pipeline as one real `submit_attestation` (tx `0e2a7be5…`), visible
+on-chain (`reputationScore` 50, one tagged `Attestation`) and through
+the read-only `/api` with identical data. Re-running the pipeline is
+idempotent. Both transactions are Horizon-confirmed in that document.
 
 ## Setup
 
