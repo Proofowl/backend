@@ -1,12 +1,15 @@
 /**
  * Environment-driven configuration for proofowl-backend.
  *
- * Everything here is read once at process start. There is no attestor
- * secret key in this scaffold: signing / submitting attestations is
- * explicitly out of scope for this pass (see README "What this repo
- * does NOT do yet"). `ATTESTOR_SECRET_KEY` is parsed only so the shape
- * is reserved and documented; nothing in the codebase uses it, and
- * `.env.example` ships a clearly-fake value.
+ * Everything here is read once at process start.
+ *
+ * `ATTESTOR_SECRET_KEY` is deliberately NOT surfaced as a value on
+ * `AppConfig` — only the boolean `attestorSecretKeyIsSet`. The one
+ * consumer of the actual secret (`createSdkAttestationSubmitter` in
+ * `src/chain/attestationSubmitter.ts`, and the opt-in submit
+ * integration test) reads `process.env.ATTESTOR_SECRET_KEY` directly,
+ * so the key never travels through this shared config object or any log
+ * of it. `.env.example` still ships a clearly-fake placeholder.
  */
 
 import { config as loadDotenv } from "dotenv";
@@ -68,8 +71,9 @@ export interface AppConfig {
   /** Prisma / SQLite connection string. Only used by the queue layer. */
   databaseUrl: string;
   /**
-   * Reserved. NOT used anywhere in this pass — attestation submission is
-   * out of scope. Present so the env contract is stable for the follow-up.
+   * Whether `ATTESTOR_SECRET_KEY` is present in the environment. The
+   * value itself is intentionally not exposed here (see the module
+   * doc) — this boolean is enough for a readiness check / startup log.
    */
   attestorSecretKeyIsSet: boolean;
 }
