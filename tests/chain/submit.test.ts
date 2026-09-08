@@ -236,3 +236,79 @@ test("a malformed githubIdHash throws (a caller bug, not a runtime result)", asy
     /64-char hex/,
   );
 });
+
+// --- 2. contract rejection at simulation --------------------------
+
+/** A prepared tx whose dry run FAILED with `simulationError`. */
+function preparedSimError(simulationError: string): AttestationSubmitter["prepare"] {
+  return async () => ({
+    simulationError,
+    simulatedCreditWallet: null,
+    minResourceFee: null,
+    send: async () => {
+      throw new Error("send() must not be called after a simulation error");
+    },
+  });
+}
+
+const CONTRACT_REJECTIONS: ReadonlyArray<{ raw: string; code: number; name: string }> = [
+  { raw: "HostError: Error(Contract, #7)", code: 7, name: "WalletNotLinked" },
+  { raw: "HostError: Error(Contract, #6)", code: 6, name: "DuplicateAttestation" },
+  { raw: "HostError: Error(Contract, #8)", code: 8, name: "InvalidComplexity" },
+];
+
+for (const { raw, code, name } of CONTRACT_REJECTIONS) {
+  test(`simulation error ${JSON.stringify(raw)} -> contract-rejected ${name}`, async () => {
+    const { deps, attempts } = withAttemptSpy({
+      reads: fakeReads(),
+      submitter: submitter(preparedSimError(raw)),
+    });
+    const res = await submitAttestation(baseInput(), deps);
+    assert.equal(res.kind, "contract-rejected");
+    if (res.kind !== "contract-rejected") return;
+    assert.equal(res.phase, "simulation");
+    assert.equal(res.errorCode, code);
+    assert.equal(res.errorName, name);
+    assert.equal(res.detail, raw);
+    assert.equal(attempts.length, 0, "a simulation rejection costs no submission attempt");
+  });
+}
+
+test("a bare contract-error variant name is classified too", async () => {
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads(),
+    submitter: submitter(preparedSimError("DuplicateAttestation")),
+  });
+  assert.equal(res.kind, "contract-rejected");
+  if (res.kind !== "contract-rejected") return;
+  assert.equal(res.errorCode, 6);
+  assert.equal(res.errorName, "DuplicateAttestation");
+});
+
+test("an unrecognised simulation error -> contract-rejected with errorCode null, detail preserved", async () => {
+  const raw = "HostError: something entirely unexpected happened";
+  const res = await submitAttestation(baseInput(), {
+    reads: fakeReads(),
+    submitter: submitter(preparedSimError(raw)),
+  });
+  assert.equal(res.kind, "contract-rejected");
+  if (res.kind !== "contract-rejected") return;
+  assert.equal(res.errorCode, null);
+  assert.equal(res.errorName, "unknown");
+  assert.equal(res.detail, raw);
+});
+
+test("prepare() THROWING a value that carries a contract code -> contract-rejected", async () => {
+  const { deps, attempts } = withAttemptSpy({
+    reads: fakeReads(),
+    submitter: submitter(async () => {
+      throw new Error("simulation failed: HostError: Error(Contract, #7)");
+    }),
+  });
+  const res = await submitAttestation(baseInput(), deps);
+  assert.equal(res.kind, "contract-rejected");
+  if (res.kind !== "contract-rejected") return;
+  assert.equal(res.errorCode, 7);
+  assert.equal(res.errorName, "WalletNotLinked");
+  assert.equal(attempts.length, 0);
+});
