@@ -11,3 +11,4 @@ export * from "./log.js";
 export * from "./seed.js";
 export * from "./discover.js";
 export * from "./runOnce.js";
+export * from "./schedule.js";
