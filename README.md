@@ -27,8 +27,10 @@ not:
   **testnet-only** and refuse any other network. A submission happens
   only inside an explicit `pipeline:once` / `pipeline:loop` run (or the
   opt-in integration tests);
-- **expose a REST API** for the frontend — the Express app serves only
-  `/health` and `/ready`;
+- **expose any _write_ HTTP API** — the Express app serves `/health`,
+  `/ready`, and a **read-only** `/api` ([below](#read-only-rest-api))
+  that only reads on-chain state and local queue counts. No route
+  submits an attestation, signs anything, or writes to the queue;
 - **run the wallet-linking OAuth/challenge flow** — the submit path
   assumes the contributor's wallet is already linked on-chain and
   short-circuits to "needs queueing" when it is not. The attestor secret
@@ -74,7 +76,8 @@ that repo's `sdk/typescript` package as a dependency and its
 | `src/chain/`    | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. Plus `submitAttestation(...)` ([below](#submitting-attestations)) — the one mutating call: testnet-only, dry-run-first, two hard pre-conditions. |
 | `src/queue/`    | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                                                                                                                                                                             |
 | `src/pipeline/` | `runOnce()` — one idempotent pass of discover → verify → submit/queue → retry; `createScheduler()` — runs it on an interval with overlap prevention; `main.ts` — the `pipeline:once` / `pipeline:loop` entrypoints. Never imported by `src/app.ts`. [Below](#the-automation-pipeline).                                                                     |
-| `src/app.ts`    | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                                                                                                                                                                        |
+| `src/app.ts`    | Express app: `/health`, `/ready`, and (when wired with deps) the read-only `/api` router from `src/api/`.                                                                                                                                                                                                                                                  |
+| `src/api/`      | The read-only REST API — `createApiRouter(deps)` mounts `GET /api/reputation`, `/api/attestations`, `/api/wallet-for-github`, `/api/queue/status` behind a response cache + per-IP rate limiter. Reads only; never imports a signer or the pipeline. [Below](#read-only-rest-api).                                                                         |
 
 ### The five verification checks
 
@@ -185,11 +188,82 @@ does the RPC round-trip and the shim only replaces the final
 ScVal→JS step with the generic `scValToNative`. Remove it once the SDK
 bumps `@stellar/stellar-sdk`.
 
+### Read-only REST API
+
+`src/api/` — a thin HTTP surface over what already exists on-chain and
+in the local queue. **It has no write capability at all**: no route
+submits an attestation, calls a signer, touches `ATTESTOR_SECRET_KEY`,
+or writes to the queue (the `ApiDeps` type is `Pick<>`-narrowed so this
+is enforced at compile time, not just by convention). It is mounted by
+`buildApp({ apiDeps: createApiDeps(config) })`, which `npm start` /
+`npm run dev` do — and `createApiDeps` only _constructs_ the read client
+and queue handle, so the server still makes no RPC or DB call on boot.
+
+Every uncached request runs one Soroban RPC _simulation_ (or, for
+`/queue/status`, four local `COUNT`s). Order per request: **response
+cache → per-IP rate limiter → route**. Base path `/api`.
+
+#### Endpoints
+
+| Method & path                                  | Success body                                                                                                                                                                                                                                                                                                      |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/reputation/:wallet`                  | `{ "wallet": "G…", "reputationScore": 250, "attestationCount": 2 }`                                                                                                                                                                                                                                               |
+| `GET /api/attestations/:wallet?cursor=&limit=` | `{ "wallet": "G…", "pagination": { "cursor": 0, "limit": 50, "count": 2, "nextCursor": null, "maxPageSize": 50 }, "attestations": [ { "sequence": 0, "repo": "owner/name", "prNumber": 7, "prHashHex": "…64hex…", "githubIdHashHex": "…64hex…", "issueId": "1", "complexity": 150, "timestamp": 1788784892 } ] }` |
+| `GET /api/wallet-for-github/:githubIdHash`     | `{ "githubIdHash": "…64hex…", "wallet": "G…" \| null }`                                                                                                                                                                                                                                                           |
+| `GET /api/queue/status`                        | `{ "counts": { "WAITING_FOR_WALLET_LINK": 4, "READY_TO_SUBMIT": 1, "ALREADY_ATTESTED": 3, "DISMISSED": 0 }, "total": 8 }`                                                                                                                                                                                         |
+
+Notes:
+
+- **`:wallet`** must be a Stellar public key (`G` + 55 base32 chars);
+  **`:githubIdHash`** must be 64 hex chars (either case, echoed
+  lowercased). A malformed one is a **400 before any RPC**.
+- A syntactically valid wallet / hash that has **never appeared
+  on-chain is not an error** — you get `reputationScore: 0`,
+  `attestationCount: 0`, an empty `attestations` list, or
+  `wallet: null`. Only malformed input is a 400; there is no 404 for
+  "unseen".
+- **`?limit`** defaults to and is capped at `MAX_PAGE_SIZE = 50` — the
+  contract's own page size (`contract-api-v2.md`). **`?cursor`** is the
+  zero-based start index. `nextCursor` is `cursor + count` on a full
+  page, `null` on a short one (the end).
+- `issueId` is a **decimal string** (a u64 can exceed
+  `Number.MAX_SAFE_INTEGER`); `timestamp` is a **number** (Unix
+  seconds).
+- `/api/queue/status` returns **aggregate counts only** — no per-item
+  listing. That endpoint is a deliberate follow-up (it needs its own
+  pagination / filters / per-row projection).
+- Repeated identical GETs within **3 s** are served from an in-process
+  cache (`x-proofowl-cache: hit|miss`) and do not re-hit the RPC or
+  spend rate-limit budget.
+
+#### Error responses
+
+| Status | Body                                                          | When                                                                                                                             |
+| ------ | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `400`  | `{ "error": "<what's wrong with the input>" }`                | malformed `:wallet` / `:githubIdHash` / `?cursor` / `?limit`                                                                     |
+| `404`  | `{ "error": "not found" }`                                    | unknown path under `/api`                                                                                                        |
+| `429`  | `{ "error": "rate limit exceeded", "retryAfterSeconds": 60 }` | more than the limit below, per IP, per window                                                                                    |
+| `500`  | `{ "error": "internal error" }`                               | any RPC / DB / unexpected failure — **the real error, its message and stack, is written to the server log only, never the body** |
+
+#### Rate limiting
+
+**60 requests per IP per 60 s** (≈ 1 req/s) on `/api/*`
+(`express-rate-limit`, `RateLimit` draft-7 headers, legacy
+`X-RateLimit-*` suppressed). Sized for a read-only **testnet demo**: a
+human browsing a passport UI or a frontend polling one wallet stays far
+under it, the 3 s cache absorbs bursts, and a scraper is capped near
+what the public SDF testnet RPC tolerates from one client. It is **not**
+production sizing — a real deployment would rate-limit at the edge and
+issue per-key quotas. No reverse proxy is assumed; the key is the socket
+IP. Defaults are overridable per router (`createApiRouter(deps, {
+rateLimit, cache })`).
+
 ### Submitting attestations
 
 `submitAttestation(input, deps)` (`src/chain/submit.ts`) turns one
 verified, **attestable** contribution into a real `submit_attestation`
-call on the v0.3 registry — the only state-changing path in this repo.
+call on the v0.3 registry — the only state-changing path in this repo,
+and it is **not reachable from the HTTP layer**.
 It assembles no transaction by hand: it drives `@proofowl/contract-sdk`'s
 `prepareSubmitAttestation` through an injected `AttestationSubmitter`
 (`createSdkAttestationSubmitter`, which signs with `ATTESTOR_SECRET_KEY`).
@@ -360,7 +434,7 @@ cp .env.example .env
 npx prisma migrate deploy              # creates prisma/dev.db
 
 npm run check                          # format:check + lint + typecheck + test
-npm run dev                            # starts the /health server (no polling)
+npm run dev                            # /health + /ready + read-only /api (no polling, no scheduler)
 ```
 
 ### Scripts
@@ -371,7 +445,7 @@ npm run dev                            # starts the /health server (no polling)
 | `npm test`                 | compile `tsconfig.test.json` → `node --test`                                                                                                        |
 | `npm run test:integration` | `PROOFOWL_INTEGRATION=1 npm test` — adds the live testnet tests (`submitAttestation` + `runOnce` submit 2 real tx **each**; the rest are read-only) |
 | `npm run build`            | `tsc` → `dist/`                                                                                                                                     |
-| `npm run dev`              | `tsx watch src/server.ts` (liveness server only — no pipeline)                                                                                      |
+| `npm run dev`              | `tsx watch src/server.ts` — /health + /ready + read-only /api; no pipeline / scheduler                                                              |
 | `npm run pipeline:once`    | one pipeline pass, print the JSON summary, exit                                                                                                     |
 | `npm run pipeline:loop`    | run a pass now, then one every `PIPELINE_POLL_INTERVAL_MS`                                                                                          |
 
