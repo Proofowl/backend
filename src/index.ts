@@ -12,4 +12,5 @@ export * as github from "./github/index.js";
 export * as chain from "./chain/index.js";
 export * as queue from "./queue/index.js";
 export * as pipeline from "./pipeline/index.js";
+export * as api from "./api/index.js";
 export { buildApp } from "./app.js";
