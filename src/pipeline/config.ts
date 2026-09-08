@@ -15,6 +15,8 @@ export const MIN_POLL_INTERVAL_MS = 60_000;
 export const DEFAULT_POLL_INTERVAL_MS = 600_000;
 /** Default per-repo issue ceiling for one discovery pass. */
 export const DEFAULT_MAX_ISSUES_PER_REPO = 100;
+/** Default ceiling on queued items drained (re-checked) per pass. */
+export const DEFAULT_MAX_QUEUE_DRAIN = 100;
 
 export interface PipelineConfig {
   /**
@@ -39,6 +41,21 @@ export interface PipelineConfig {
    * prefilter.
    */
   waveLabelNames: string[] | undefined;
+  /**
+   * Hard cap on queued (`WAITING_FOR_WALLET_LINK`) rows re-checked in one
+   * pass. From `PIPELINE_MAX_QUEUE_DRAIN`; defaults to
+   * {@link DEFAULT_MAX_QUEUE_DRAIN}. Bounds the chain reads a single pass
+   * makes while a backlog clears.
+   */
+  maxQueueDrain: number;
+  /**
+   * When true, the pass simulates every `submit_attestation` and never
+   * signs or sends — discovery still runs and unlinked contributions are
+   * still enqueued, but no transaction is broadcast. From
+   * `PIPELINE_DRY_RUN` (`"true"`/`"1"`); defaults to `false`. A safe way
+   * to soak the loop against production data before letting it write.
+   */
+  dryRun: boolean;
 }
 
 function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number): number {
@@ -51,6 +68,11 @@ function intFromEnv(env: NodeJS.ProcessEnv, name: string, fallback: number, min:
     );
   }
   return n;
+}
+
+function boolFromEnv(env: NodeJS.ProcessEnv, name: string): boolean {
+  const raw = (env[name] ?? "").trim().toLowerCase();
+  return raw === "true" || raw === "1" || raw === "yes";
 }
 
 export function loadPipelineConfig(env: NodeJS.ProcessEnv = process.env): PipelineConfig {
@@ -72,5 +94,7 @@ export function loadPipelineConfig(env: NodeJS.ProcessEnv = process.env): Pipeli
       1,
     ),
     waveLabelNames: names.length > 0 ? names : undefined,
+    maxQueueDrain: intFromEnv(env, "PIPELINE_MAX_QUEUE_DRAIN", DEFAULT_MAX_QUEUE_DRAIN, 1),
+    dryRun: boolFromEnv(env, "PIPELINE_DRY_RUN"),
   };
 }
