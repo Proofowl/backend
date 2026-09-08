@@ -58,6 +58,23 @@ export interface GitHubClient {
     repo: string,
     options?: ListRepoIssuesOptions,
   ): Promise<GitHubIssue[]>;
+  /**
+   * Pull requests linked to an issue via GitHub's own closing-issue
+   * mechanism — the inverse of {@link getClosingIssueNumbers}. Uses the
+   * GraphQL `closedByPullRequestsReferences` connection (closed PRs
+   * included), returning each linked PR's number and whether it merged.
+   */
+  getIssueLinkedPullRequests(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+  ): Promise<LinkedPullRequest[]>;
+}
+
+/** One pull request linked to an issue (see {@link GitHubClient.getIssueLinkedPullRequests}). */
+export interface LinkedPullRequest {
+  number: number;
+  merged: boolean;
 }
 
 export interface HttpGitHubClientOptions {
@@ -175,6 +192,28 @@ export class HttpGitHubClient implements GitHubClient {
     return rows.filter((r) => r.pull_request === undefined);
   }
 
+  /** POST one GraphQL query, unwrap `data`, and turn transport / `errors` into `UpstreamError`. */
+  private async graphql<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+    let res: Response;
+    try {
+      res = await this.fetchImpl(this.graphqlUrl, {
+        method: "POST",
+        headers: this.headers({ "content-type": "application/json" }),
+        body: JSON.stringify({ query, variables }),
+      });
+    } catch (err) {
+      throw new UpstreamError("GitHub GraphQL request failed", err);
+    }
+    if (!res.ok) {
+      throw new UpstreamError(`GitHub GraphQL ${res.status}: ${await safeText(res)}`);
+    }
+    const body = (await res.json()) as { errors?: unknown[]; data?: T };
+    if (body.errors?.length) {
+      throw new UpstreamError(`GitHub GraphQL errors: ${JSON.stringify(body.errors)}`);
+    }
+    return (body.data ?? ({} as T)) as T;
+  }
+
   async getClosingIssueNumbers(owner: string, repo: string, prNumber: number): Promise<number[]> {
     const query = `
       query ($owner: String!, $repo: String!, $pr: Int!) {
@@ -184,32 +223,41 @@ export class HttpGitHubClient implements GitHubClient {
           }
         }
       }`;
-    let res: Response;
-    try {
-      res = await this.fetchImpl(this.graphqlUrl, {
-        method: "POST",
-        headers: this.headers({ "content-type": "application/json" }),
-        body: JSON.stringify({ query, variables: { owner, repo, pr: prNumber } }),
-      });
-    } catch (err) {
-      throw new UpstreamError("GitHub GraphQL request failed", err);
-    }
-    if (!res.ok) {
-      throw new UpstreamError(`GitHub GraphQL ${res.status}: ${await safeText(res)}`);
-    }
-    const body = (await res.json()) as {
-      errors?: unknown[];
-      data?: {
-        repository?: {
-          pullRequest?: { closingIssuesReferences?: { nodes?: Array<{ number: number }> } };
+    const data = await this.graphql<{
+      repository?: {
+        pullRequest?: { closingIssuesReferences?: { nodes?: Array<{ number: number }> } };
+      };
+    }>(query, { owner, repo, pr: prNumber });
+    const nodes = data.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
+    return nodes.map((n) => n.number);
+  }
+
+  async getIssueLinkedPullRequests(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+  ): Promise<LinkedPullRequest[]> {
+    const query = `
+      query ($owner: String!, $repo: String!, $issue: Int!) {
+        repository(owner: $owner, name: $repo) {
+          issue(number: $issue) {
+            closedByPullRequestsReferences(first: 50, includeClosedPrs: true) {
+              nodes { number merged }
+            }
+          }
+        }
+      }`;
+    const data = await this.graphql<{
+      repository?: {
+        issue?: {
+          closedByPullRequestsReferences?: {
+            nodes?: Array<{ number: number; merged: boolean }>;
+          };
         };
       };
-    };
-    if (body.errors?.length) {
-      throw new UpstreamError(`GitHub GraphQL errors: ${JSON.stringify(body.errors)}`);
-    }
-    const nodes = body.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
-    return nodes.map((n) => n.number);
+    }>(query, { owner, repo, issue: issueNumber });
+    const nodes = data.repository?.issue?.closedByPullRequestsReferences?.nodes ?? [];
+    return nodes.map((n) => ({ number: n.number, merged: n.merged === true }));
   }
 }
 
