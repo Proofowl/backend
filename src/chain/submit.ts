@@ -32,9 +32,14 @@
  * network exercise is the opt-in integration test.
  */
 
-import type { ComplexityTier } from "@proofowl/contract-sdk";
+import {
+  PROOFOWL_ERROR_NAME,
+  parseProofOwlError,
+  type ComplexityTier,
+} from "@proofowl/contract-sdk";
 
 import { ValidationError } from "../lib/errors.js";
+import { hashGitHubPullRequestV1, hashGitHubPullRequestV1Hex } from "../hashing/identifiers.js";
 import type { VerificationResult } from "../github/types.js";
 import type { AttestationRecord } from "./attestationDecode.js";
 import type { ChainReadClient } from "./readClient.js";
@@ -334,3 +339,215 @@ export function isLikelyNetworkError(err: unknown): boolean {
 }
 
 export { HEX32_RE as GITHUB_ID_HASH_HEX_RE };
+
+function messageOf(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function hexToBytes32(hex: string): Uint8Array {
+  // `hex` is HEX32_RE-validated by the caller, so this is exactly 32 bytes.
+  return new Uint8Array(Buffer.from(hex, "hex"));
+}
+
+function nameForCode(code: number): string {
+  return (
+    PROOFOWL_ERROR_NAME[code as keyof typeof PROOFOWL_ERROR_NAME] ??
+    /* istanbul ignore next */ "unknown"
+  );
+}
+
+/** Turn a raw simulation error string into a {@link ContractRejectedResult}. */
+function classifySimulationError(raw: string): ContractRejectedResult {
+  const code = parseProofOwlError(raw);
+  return {
+    kind: "contract-rejected",
+    phase: "simulation",
+    errorCode: code ?? null,
+    errorName: code != null ? nameForCode(code) : "unknown",
+    detail: raw,
+  };
+}
+
+/** A thrown value that carries a recognisable contract error code, or `null`. */
+function classifyThrownContractError(err: unknown): ContractRejectedResult | null {
+  const code = parseProofOwlError(err);
+  if (code == null) return null;
+  return {
+    kind: "contract-rejected",
+    phase: "simulation",
+    errorCode: code,
+    errorName: nameForCode(code),
+    detail: messageOf(err),
+  };
+}
+
+/**
+ * Submit one verified, attestable contribution as an on-chain
+ * attestation — or return, without submitting, the distinct reason it
+ * could not be. See {@link SubmitAttestationResult} for every outcome.
+ *
+ * Order of operations (each is a genuine gate, not a formality):
+ *  1. refuse anything but Stellar testnet;
+ *  2. reject a non-attestable verification result;
+ *  3. re-read the identity→wallet link fresh — unlinked ⇒ "needs queueing";
+ *  4. consult `isContributionAlreadyAttested` — attested ⇒ refuse;
+ *  5. assemble + simulate; a contract rejection here costs no signature;
+ *  6. `dryRun` ⇒ stop and report the clean simulation;
+ *  7. otherwise sign with the attestor key and send, then classify the
+ *     network's verdict (success / rejected-at-submission / failed /
+ *     unconfirmed).
+ *
+ * Throws only for a programming error (a malformed `githubIdHash`, a
+ * candidate the SDK rejects as structurally invalid). Every real-world
+ * failure — RPC down, contract rejection, transaction failure — comes
+ * back as a typed result the caller can branch on.
+ */
+export async function submitAttestation(
+  input: SubmitAttestationInput,
+  deps: SubmitAttestationDeps,
+): Promise<SubmitAttestationResult> {
+  // 1. Network guard — a hard stop, before any I/O.
+  assertTestnet(deps.submitter.network);
+
+  // 2. Shape validation.
+  const githubIdHashHex = input.githubIdHash.toLowerCase();
+  if (!HEX32_RE.test(githubIdHashHex)) {
+    throw new ValidationError("githubIdHash must be a 64-char hex string (32 bytes)");
+  }
+  const { complexity } = input;
+
+  // 3. Only attestable candidates are ever submitted.
+  if (input.verification.attestable !== true) {
+    return {
+      kind: "not-attestable",
+      failingCheckIds: input.verification.checks
+        .filter((c) => c.status !== "pass")
+        .map((c) => c.id),
+      indeterminate: input.verification.indeterminate,
+    };
+  }
+
+  // 4. Canonical identifiers, derived from the candidate itself.
+  const { owner, repo: repoName, prNumber } = input.verification.candidate;
+  const repo = `${owner}/${repoName}`.toLowerCase();
+  const prHash = hashGitHubPullRequestV1(owner, repoName, prNumber);
+  const prHashHex = hashGitHubPullRequestV1Hex(owner, repoName, prNumber);
+
+  // 5. HARD PRE-CONDITION: the identity must resolve to a wallet.
+  let linkedWallet: string | null;
+  try {
+    linkedWallet = await deps.reads.getWalletForGithubIdHash(githubIdHashHex);
+  } catch (err) {
+    return { kind: "rpc-error", during: "wallet-link-read", detail: messageOf(err) };
+  }
+  if (linkedWallet === null) {
+    return { kind: "not-submittable", reason: "wallet-not-linked", prHashHex, githubIdHashHex };
+  }
+
+  // 6. HARD PRE-CONDITION: never submit a PR that is already credited.
+  let already;
+  try {
+    already = await deps.reads.isContributionAlreadyAttested(githubIdHashHex, prHashHex);
+  } catch (err) {
+    return { kind: "rpc-error", during: "already-attested-read", detail: messageOf(err) };
+  }
+  if (already.attested && already.match) {
+    return {
+      kind: "already-attested",
+      prHashHex,
+      githubIdHashHex,
+      linkedWallet: already.linkedWallet ?? linkedWallet,
+      match: already.match,
+    };
+  }
+
+  // 7. Assemble + SIMULATE. No signature, no fee yet.
+  let prepared: PreparedAttestationTx;
+  try {
+    prepared = await deps.submitter.prepare({
+      githubIdHash: hexToBytes32(githubIdHashHex),
+      repo,
+      prNumber,
+      issueId: BigInt(input.issueId),
+      complexity,
+      prHash,
+    });
+  } catch (err) {
+    if (err instanceof ValidationError || err instanceof TypeError || err instanceof RangeError) {
+      throw err; // malformed input the SDK refused to assemble — a caller bug
+    }
+    return (
+      classifyThrownContractError(err) ?? {
+        kind: "rpc-error",
+        during: "prepare",
+        detail: messageOf(err),
+      }
+    );
+  }
+
+  // 8. Inspect the dry run.
+  if (prepared.simulationError !== null) {
+    return classifySimulationError(prepared.simulationError);
+  }
+
+  // 9. A dry run stops here — nothing is signed or sent.
+  if (input.dryRun === true) {
+    return {
+      kind: "dry-run-ok",
+      prHashHex,
+      githubIdHashHex,
+      repo,
+      prNumber,
+      complexity,
+      simulatedCreditWallet: prepared.simulatedCreditWallet,
+      minResourceFee: prepared.minResourceFee,
+    };
+  }
+
+  // 10. REAL SUBMISSION. Count it now — before the send can throw.
+  deps.onSubmissionAttempt?.({ prHashHex, githubIdHashHex, repo, prNumber });
+
+  let outcome: SentAttestationOutcome;
+  try {
+    outcome = await prepared.send();
+  } catch (err) {
+    if (isLikelyNetworkError(err)) {
+      return { kind: "rpc-error", during: "send", detail: messageOf(err) };
+    }
+    return {
+      kind: "submission-failed",
+      stage: "send",
+      txHash: null,
+      status: "threw",
+      detail: messageOf(err),
+    };
+  }
+
+  if (outcome.status === "SUCCESS") {
+    return {
+      kind: "submitted",
+      txHash: outcome.txHash ?? "",
+      ledger: outcome.ledger,
+      creditedWallet: outcome.creditedWallet,
+      prHashHex,
+      githubIdHashHex,
+      repo,
+      prNumber,
+      complexity,
+    };
+  }
+
+  return {
+    kind: "submission-failed",
+    stage: outcome.status === "ERROR" ? "send" : "confirm",
+    txHash: outcome.txHash,
+    status: outcome.status,
+    detail: outcome.detail ?? `submission ended in status ${outcome.status}`,
+  };
+}
