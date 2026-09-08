@@ -143,6 +143,56 @@ test("HttpGitHubClient.listRepoIssues: labels prefilter and explicit state pass 
   assert.match(calls[0]!, /labels=Wave%2Cstellar\+wave/);
 });
 
+test("HttpGitHubClient.getIssueLinkedPullRequests parses the GraphQL connection", async () => {
+  const client = new HttpGitHubClient({
+    apiBaseUrl: "https://api.github.com",
+    fetchImpl: (async (_url: string | URL, init?: RequestInit) => {
+      assert.equal(init?.method, "POST");
+      const parsed = JSON.parse(String(init?.body));
+      assert.equal(parsed.variables.issue, 7);
+      assert.match(parsed.query, /closedByPullRequestsReferences/);
+      return jsonResponse({
+        data: {
+          repository: {
+            issue: {
+              closedByPullRequestsReferences: {
+                nodes: [
+                  { number: 42, merged: true },
+                  { number: 43, merged: false },
+                ],
+              },
+            },
+          },
+        },
+      });
+    }) as typeof fetch,
+  });
+  assert.deepEqual(await client.getIssueLinkedPullRequests("o", "r", 7), [
+    { number: 42, merged: true },
+    { number: 43, merged: false },
+  ]);
+});
+
+test("HttpGitHubClient.getIssueLinkedPullRequests: no linked PRs -> empty array", async () => {
+  const client = new HttpGitHubClient({
+    apiBaseUrl: "https://api.github.com",
+    fetchImpl: (async () =>
+      jsonResponse({
+        data: { repository: { issue: { closedByPullRequestsReferences: { nodes: [] } } } },
+      })) as typeof fetch,
+  });
+  assert.deepEqual(await client.getIssueLinkedPullRequests("o", "r", 7), []);
+});
+
+test("HttpGitHubClient GraphQL: an errors[] payload becomes UpstreamError", async () => {
+  const client = new HttpGitHubClient({
+    apiBaseUrl: "https://api.github.com",
+    fetchImpl: (async () =>
+      jsonResponse({ errors: [{ message: "Could not resolve to a Repository" }] })) as typeof fetch,
+  });
+  await assert.rejects(client.getIssueLinkedPullRequests("o", "r", 7), /GraphQL errors/);
+});
+
 test("HttpGitHubClient surfaces a GitHub 404 as NotFoundError", async () => {
   const client = new HttpGitHubClient({
     apiBaseUrl: "https://api.github.com",
