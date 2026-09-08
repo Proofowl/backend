@@ -6,21 +6,27 @@ contributions and submits them as on-chain attestations to the
 already-deployed
 [`proofowl-contracts`](https://github.com/Proofowl/proofowl-contracts)
 registry. The submission call and its safeguards exist now
-([below](#submitting-attestations)); the loop that drives it
-automatically is still a later pass.
+([below](#submitting-attestations)), and the automation pipeline that
+drives discovery → verification → submission/queue → retry exists now
+too ([below](#the-automation-pipeline)) — but it runs **only** when an
+operator invokes `npm run pipeline:once` / `pipeline:loop`. It is never
+wired into the HTTP server.
 
 ## What this repo does NOT do yet
 
-This is close to a **scaffold**, not yet a running service. In this pass
-it does not:
+This is still closer to a **scaffold** than a hosted service. It does
+not:
 
-- **poll GitHub** on a loop or on a schedule — there is no ingestion
-  worker;
-- **submit attestations automatically** — `submitAttestation`
-  (`src/chain/submit.ts`) is built, guarded, and covered, but nothing
-  calls it on a schedule. A submission is a deliberate one-off
-  invocation (or the opt-in integration test), it is **testnet-only**,
-  and it refuses any other network;
+- **poll GitHub automatically** — the pipeline
+  (`src/pipeline/`, [below](#the-automation-pipeline)) does discovery →
+  verify → submit/queue → retry in one pass, and `pipeline:loop` will
+  repeat it on an interval, but there is no always-on worker: a human
+  starts it, and it is **not** started by `npm start` / `npm run dev`;
+- **submit attestations from the HTTP server** — `submitAttestation`
+  (`src/chain/submit.ts`) and the pipeline that calls it are
+  **testnet-only** and refuse any other network. A submission happens
+  only inside an explicit `pipeline:once` / `pipeline:loop` run (or the
+  opt-in integration tests);
 - **expose a REST API** for the frontend — the Express app serves only
   `/health` and `/ready`;
 - **run the wallet-linking OAuth/challenge flow** — the submit path
@@ -33,7 +39,8 @@ it does not:
 What it _does_ provide: the project structure, the canonical hashing
 module, the GitHub verification logic, on-chain reads via the contracts
 SDK, the testnet attestation-submission call with its safeguards, a
-one-table local queue, tests, and CI.
+one-table local queue, the automation pipeline that ties them together
+behind an explicit command, tests, and CI.
 
 ## How it fits together
 
@@ -43,9 +50,10 @@ one-table local queue, tests, and CI.
   timeline, closing     - 5 verification checks - one attestation per merged PR
   issue links)          - self-merge flag       - reputation score
                         - on-chain READS
-                        - submit_attestation    (testnet only, no loop yet)
+                        - submit_attestation    (testnet only)
                         - queue of verified-
                           but-unlinked contribs
+                        - automation pipeline   (explicit command only)
                                 │
                         proofowl-frontend (not started) — will read the
                         registry for passports/leaderboards and drive the
@@ -59,13 +67,14 @@ that repo's `sdk/typescript` package as a dependency and its
 
 ## Modules
 
-| Path           | What it is                                                                                                                                                                                                                                                                                                                                                 |
-| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `src/hashing/` | `github_id_hash` / `pr_hash` per `identifier-spec-v1` — an independent implementation, cross-checked against the contracts SDK and the spec's published vectors.                                                                                                                                                                                           |
-| `src/github/`  | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` / `ApprovedOrgsAllowlistSource` are interfaces (fixtures in tests).                                                                                                                                                     |
-| `src/chain/`   | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. Plus `submitAttestation(...)` ([below](#submitting-attestations)) — the one mutating call: testnet-only, dry-run-first, two hard pre-conditions. |
-| `src/queue/`   | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                                                                                                                                                                             |
-| `src/app.ts`   | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                                                                                                                                                                        |
+| Path            | What it is                                                                                                                                                                                                                                                                                                                                                 |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `src/hashing/`  | `github_id_hash` / `pr_hash` per `identifier-spec-v1` — an independent implementation, cross-checked against the contracts SDK and the spec's published vectors.                                                                                                                                                                                           |
+| `src/github/`   | `verifyContribution(candidate)` → five independently-inspectable checks + a self-merge flag. `GitHubClient` / `ApprovedOrgsSource` / `ApprovedOrgsAllowlistSource` are interfaces (fixtures in tests).                                                                                                                                                     |
+| `src/chain/`    | `createChainReadClient(config)` — read-only simulations against the registry via `@proofowl/contract-sdk`. Identity↔wallet lookups, reputation, paged attestation history, an "already attested?" helper. Plus `submitAttestation(...)` ([below](#submitting-attestations)) — the one mutating call: testnet-only, dry-run-first, two hard pre-conditions. |
+| `src/queue/`    | `PendingContributionRepository` — the one persisted thing: contributions that passed verification but whose wallet is not linked on-chain yet.                                                                                                                                                                                                             |
+| `src/pipeline/` | `runOnce()` — one idempotent pass of discover → verify → submit/queue → retry; `createScheduler()` — runs it on an interval with overlap prevention; `main.ts` — the `pipeline:once` / `pipeline:loop` entrypoints. Never imported by `src/app.ts`. [Below](#the-automation-pipeline).                                                                     |
+| `src/app.ts`    | Express app: `/health`, `/ready`. No domain routes.                                                                                                                                                                                                                                                                                                        |
 
 ### The five verification checks
 
@@ -242,9 +251,94 @@ integration test. The duplicate-refusal check consumed none — it is
 rejected before a transaction is assembled. This cap was a
 development-time discipline for that task (treating "how many times did
 this write" as worth counting even where nothing is at stake). It is
-**not** a permanent runtime rule: once the scheduling loop exists it will
-submit as often as there are verified, linked, un-attested
-contributions.
+**not** a permanent runtime rule: the scheduling loop
+([below](#the-automation-pipeline)) submits as often as there are
+verified, linked, un-attested contributions.
+
+## The automation pipeline
+
+`src/pipeline/` ties the modules above into an unattended loop:
+**discover → verify → submit / queue → retry**. It is a library plus two
+explicit entrypoints — it is **never** imported by `src/app.ts` and
+never runs as a side effect of `npm start` / `npm run dev`. A pass
+happens only when an operator runs one of:
+
+```bash
+npm run pipeline:once   # one pass, print the JSON summary, exit
+npm run pipeline:loop   # a pass now, then one every PIPELINE_POLL_INTERVAL_MS
+```
+
+Both need `ATTESTOR_SECRET_KEY` set (the pipeline signs `submit_attestation`
+with it); a missing or malformed key stops the process before any
+network use, without echoing the value. Both refuse a non-testnet
+`PROOFOWL_NETWORK_PASSPHRASE`.
+
+### One pass — `runOnce()`
+
+1. **Drain the queue first.** For every `WAITING_FOR_WALLET_LINK` row
+   (up to `PIPELINE_MAX_QUEUE_DRAIN`), re-read `get_wallet_for_github`.
+   Still unlinked → leave it queued, record the re-check. Now linked →
+   hand it to `submitAttestation` for a real submission.
+2. **Discover.** For each repo on the approved-orgs allowlist
+   (`src/pipeline/seed.ts` — the same curated list
+   `repo_in_approved_orgs` falls back to), find closed Wave issues with a
+   linked, merged PR (`src/pipeline/discover.ts`), bounded by
+   `PIPELINE_MAX_ISSUES_PER_REPO`. Discovery only produces candidates; it
+   does not re-derive the gating checks.
+3. **Verify + route.** Run `verifyContribution` on each candidate.
+   - not attestable / indeterminate → log and skip, **never queue**;
+   - attestable → `submitAttestation`, then route on the result `kind`:
+     `submitted` → log success (+ clear any stale queue row);
+     `already-attested` → no-op; `not-submittable` (wallet not linked) →
+     enqueue, **after** checking for an existing row so nothing is
+     duplicated and an operator-`DISMISSED` row is never revived;
+     `not-attestable` → skip; `contract-rejected` / `submission-failed` /
+     `rpc-error` → log distinctly, **no automatic retry within the pass**
+     (the next pass picks it up).
+4. **Return a summary** — counts keyed by every `submit_attestation`
+   outcome kind, for both the drain and the discovery phase, plus
+   `realSubmissionAttempts` and the `submittedTxHashes`.
+
+The pass is **idempotent**: `enqueue` upserts on `pr_hash`,
+`submitAttestation` short-circuits an already-credited PR before
+assembling anything, and a row that was just submitted is no longer
+`WAITING`. Running it twice back-to-back broadcasts nothing the first
+run already did.
+
+### The loop — `createScheduler()`
+
+`pipeline:loop` runs a pass immediately, then every
+`PIPELINE_POLL_INTERVAL_MS` (default **600000** = 10 min; floor 60000,
+rejected loudly below it). **Overlap prevention:** a pass can outlast
+the interval; a tick that fires while the previous pass is still running
+is **skipped** — passes never stack or run concurrently. `SIGINT` /
+`SIGTERM` stop the scheduler and disconnect Prisma; a pass already in
+flight finishes.
+
+### Config
+
+| env var                        | default  | meaning                                                    |
+| ------------------------------ | -------- | ---------------------------------------------------------- |
+| `PIPELINE_POLL_INTERVAL_MS`    | `600000` | `pipeline:loop` interval; floor `60000`                    |
+| `PIPELINE_MAX_ISSUES_PER_REPO` | `100`    | issues fetched per seed repo per discovery pass            |
+| `PIPELINE_MAX_QUEUE_DRAIN`     | `100`    | queued rows re-checked per pass                            |
+| `PIPELINE_DRY_RUN`             | `false`  | simulate every submission, never sign/send; still enqueues |
+| `WAVE_LABEL_NAMES`             | _unset_  | exact Wave label names (matcher + discovery prefilter)     |
+
+### Tests
+
+Offline unit tests (`tests/pipeline/runOnce.test.ts`,
+`tests/pipeline/schedule.test.ts`) cover the drain-first ordering, the
+routing for every outcome kind, the duplicate-queue guard, idempotency,
+dry-run, and scheduler overlap prevention — all against fakes, no
+network or key. One opt-in integration test
+(`tests/pipeline/runOnce.integration.test.ts`, gated on
+`PROOFOWL_INTEGRATION=1` **and** `ATTESTOR_SECRET_KEY`) exercises the
+whole thing once against the live v0.3 testnet: pass #1 enqueues an
+unlinked synthetic contribution (0 tx), a real `link_github` follows
+(1 tx), pass #2 drains the queue and submits it (1 tx), the record is
+read back on-chain, and a pass #3 confirms everything is now
+`already-attested` (0 tx) — **2 real transactions total.**
 
 ## Setup
 
@@ -271,16 +365,19 @@ npm run dev                            # starts the /health server (no polling)
 
 ### Scripts
 
-| script                     | does                                                                  |
-| -------------------------- | --------------------------------------------------------------------- |
-| `npm run check`            | the full local gate (format, lint, typecheck, unit tests)             |
-| `npm test`                 | compile `tsconfig.test.json` → `node --test`                          |
-| `npm run test:integration` | `PROOFOWL_INTEGRATION=1 npm test` — adds real read-only testnet reads |
-| `npm run build`            | `tsc` → `dist/`                                                       |
-| `npm run dev`              | `tsx watch src/server.ts`                                             |
+| script                     | does                                                                                                                                                |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run check`            | the full local gate (format, lint, typecheck, unit tests)                                                                                           |
+| `npm test`                 | compile `tsconfig.test.json` → `node --test`                                                                                                        |
+| `npm run test:integration` | `PROOFOWL_INTEGRATION=1 npm test` — adds the live testnet tests (`submitAttestation` + `runOnce` submit 2 real tx **each**; the rest are read-only) |
+| `npm run build`            | `tsc` → `dist/`                                                                                                                                     |
+| `npm run dev`              | `tsx watch src/server.ts` (liveness server only — no pipeline)                                                                                      |
+| `npm run pipeline:once`    | one pipeline pass, print the JSON summary, exit                                                                                                     |
+| `npm run pipeline:loop`    | run a pass now, then one every `PIPELINE_POLL_INTERVAL_MS`                                                                                          |
 
 The `*.integration.test.ts` files are **skipped** unless
-`PROOFOWL_INTEGRATION=1`.
+`PROOFOWL_INTEGRATION=1` (and, for the two that submit, unless
+`ATTESTOR_SECRET_KEY` is set).
 
 ## License
 
