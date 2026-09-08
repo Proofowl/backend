@@ -219,6 +219,53 @@ export function hashGitHubPullRequestV1Hex(
   return sha256Hex(normalizeGitHubPullRequest(owner, repo, pullNumber).canonical);
 }
 
+// --- on-chain identifier SHAPE validators -----------------------------
+//
+// Used by the read-only REST API (`src/api/`) to 400 a malformed path
+// param before any value reaches a chain read. `readClient` re-checks
+// the same shapes right before the SDK call, so these are a first line
+// of defence, not the only one. No new dependency — regex only, matching
+// this module's "node:crypto only" rule; `src/chain/readClient.ts` uses
+// the identical patterns.
+
+/** Stellar ed25519 public-key strkey: `G` + 55 base32 (`A-Z`, `2-7`) chars. */
+export const STELLAR_WALLET_RE = /^G[A-Z2-7]{55}$/;
+
+/** True iff `value` has the Stellar public-key strkey shape (`G…`, 56 chars, base32). */
+export function isStellarWalletAddress(value: unknown): value is string {
+  return typeof value === "string" && STELLAR_WALLET_RE.test(value);
+}
+
+/** Return `value` if it is a Stellar public-key strkey, else throw `ValidationError`. */
+export function assertStellarWalletAddress(value: unknown): string {
+  if (!isStellarWalletAddress(value)) {
+    throw new ValidationError(
+      "wallet must be a Stellar public key: 'G' followed by 55 base32 (A-Z, 2-7) characters",
+    );
+  }
+  return value;
+}
+
+/** `github_id_hash` hex serialization (identifier-spec-v1 §1.3): exactly 64 hex chars, no `0x`. */
+export const GITHUB_ID_HASH_HEX_RE = /^[0-9a-fA-F]{64}$/;
+
+/** True iff `value` is a 64-character hex string (either case). */
+export function isGithubIdHashHex(value: unknown): value is string {
+  return typeof value === "string" && GITHUB_ID_HASH_HEX_RE.test(value);
+}
+
+/**
+ * Return `value` lowercased if it is a 64-char hex string, else throw
+ * `ValidationError`. The on-chain value is canonically lowercase (§1.3);
+ * input is accepted case-insensitively and normalised here.
+ */
+export function assertGithubIdHashHex(value: unknown): string {
+  if (!isGithubIdHashHex(value)) {
+    throw new ValidationError("github_id_hash must be a 64-character hex string");
+  }
+  return value.toLowerCase();
+}
+
 /**
  * Recompute a `pr_hash` from an on-chain `Attestation`'s cleartext
  * `repo` (`"<owner>/<repo>"`) and `pr_number` and compare to the stored

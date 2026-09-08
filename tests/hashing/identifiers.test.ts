@@ -23,6 +23,8 @@ import {
 
 import {
   GITHUB_USER_ID_PREFIX_V1,
+  assertGithubIdHashHex,
+  assertStellarWalletAddress,
   bytesToHex,
   canonicalGitHubUserIdStringV1,
   canonicalGitHubUserIdDecimal,
@@ -30,6 +32,8 @@ import {
   hashGitHubPullRequestV1Hex,
   hashGitHubUserIdV1,
   hashGitHubUserIdV1Hex,
+  isGithubIdHashHex,
+  isStellarWalletAddress,
   normalizeGitHubPullRequest,
   verifyAttestationPrHash,
 } from "../../src/hashing/index.js";
@@ -183,6 +187,55 @@ test("pr_hash rejects the spec's 'must throw' inputs", () => {
       () => normalizeGitHubPullRequest(owner, repo, num as never),
       `${JSON.stringify([owner, repo, num])} should be rejected`,
     );
+  }
+});
+
+// --- on-chain identifier shape validators (used by the REST API) -------
+
+test("isStellarWalletAddress / assertStellarWalletAddress accept a real strkey, reject the rest", () => {
+  const good = "GCNHX5ORRQLJOFQELVAXZ3PQMIAQ3B3QLKZQRV6FXGICZEMQRWY3TRKG";
+  assert.equal(isStellarWalletAddress(good), true);
+  assert.equal(assertStellarWalletAddress(good), good);
+
+  for (const bad of [
+    "",
+    "not-a-wallet",
+    "gCNHX5ORRQLJOFQELVAXZ3PQMIAQ3B3QLKZQRV6FXGICZEMQRWY3TRKG", // lowercase g
+    good.slice(0, 55), // 55 chars
+    good + "A", // 57 chars
+    "M" + good.slice(1), // wrong version byte
+    "GCNHX5ORRQLJOFQELVAXZ3PQMIAQ3B3QLKZQRV6FXGICZEMQRWY3TRK1", // '1' not in base32
+    "GCNHX5ORRQLJOFQELVAXZ3PQMIAQ3B3QLKZQRV6FXGICZEMQRWY3TRK0", // '0' not in base32
+    123,
+    null,
+    undefined,
+  ]) {
+    assert.equal(isStellarWalletAddress(bad), false, `${JSON.stringify(bad)} should be rejected`);
+    assert.throws(() => assertStellarWalletAddress(bad as never), /Stellar public key/);
+  }
+});
+
+test("isGithubIdHashHex / assertGithubIdHashHex accept 64-hex either case, normalise to lowercase", () => {
+  const lower = "a".repeat(64);
+  const upper = "ABCDEF0123456789".repeat(4);
+  assert.equal(isGithubIdHashHex(lower), true);
+  assert.equal(isGithubIdHashHex(upper), true);
+  assert.equal(assertGithubIdHashHex(upper), upper.toLowerCase());
+  assert.equal(assertGithubIdHashHex(lower), lower);
+
+  for (const bad of [
+    "",
+    "abc",
+    "g".repeat(64), // 'g' not hex
+    "a".repeat(63), // 63
+    "a".repeat(65), // 65
+    "0x" + "a".repeat(62), // 0x prefix
+    " " + "a".repeat(63),
+    42,
+    null,
+  ]) {
+    assert.equal(isGithubIdHashHex(bad), false, `${JSON.stringify(bad)} should be rejected`);
+    assert.throws(() => assertGithubIdHashHex(bad as never), /64-character hex/);
   }
 });
 
