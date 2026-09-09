@@ -8,11 +8,12 @@ on-chain (see the README's "What this repo does NOT do yet").
 
 - **Node ≥ 22.6** with **npm**. CI uses Node 24 (last verified with Node
   24.20.0 / npm 11.19.0).
-- A local checkout of
-  [`proofowl-contracts`](https://github.com/Proofowl/proofowl-contracts)
-  as a **sibling directory** (`../proofowl-contracts`). The contract SDK
-  is a `file:` dependency; build it once with
-  `( cd ../proofowl-contracts/sdk/typescript && npm ci && npm run build )`.
+- Nothing else. The contract SDK
+  ([`@proofowl/contract-sdk`](https://www.npmjs.com/package/@proofowl/contract-sdk),
+  built from
+  [`proofowl-contracts`](https://github.com/Proofowl/proofowl-contracts))
+  is a published dependency — `npm install` resolves it like any other,
+  with no sibling checkout.
 
 ## Setup
 
