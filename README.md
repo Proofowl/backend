@@ -63,8 +63,8 @@ behind an explicit command, tests, and CI.
 ```
 
 The contract, its ABI, the canonical identifier spec, and the deployed
-testnet instance all live in `proofowl-contracts`. This service treats
-that repo's `sdk/typescript` package as a dependency and its
+testnet instance all live in `proofowl-contracts`. This service depends
+on that repo's published `@proofowl/contract-sdk` package and treats its
 `docs/integration/*` as normative.
 
 ## Modules
@@ -177,16 +177,17 @@ Targets the **v0.3 (crate `0.3.0`)** testnet instance
 `CAIDTSVPQICTA2VLE6BSQYHEELHGPZWQDYWKSDBRW4LYPZH6Q44UTAOA` by default
 (from `proofowl-contracts`' README "Deployed contracts" table).
 
-Scalar reads (`get_admin`, `get_attestor`, `get_attestation_count`,
-`get_reputation_score`, `get_wallet_for_github`, `get_github_for_wallet`)
-go straight through `@proofowl/contract-sdk`'s `createReadClient`. The
-`Attestation`-struct reads go through `src/chain/attestationDecode.ts`, a
-**documented shim**: the pinned `@stellar/stellar-sdk` (16.x) throws
-`ScSpecType scSpecTypeU64 was not string or symbol` when decoding that
-struct from the live v0.3 contract, so the SDK's generated client still
-does the RPC round-trip and the shim only replaces the final
-ScVal→JS step with the generic `scValToNative`. Remove it once the SDK
-bumps `@stellar/stellar-sdk`.
+Every read — the scalars (`get_admin`, `get_attestor`,
+`get_attestation_count`, `get_reputation_score`, `get_wallet_for_github`,
+`get_github_for_wallet`) and the `Attestation`-struct reads alike — goes
+straight through `@proofowl/contract-sdk`'s `createReadClient`. Up to
+SDK 0.2 the struct decode threw `ScSpecType scSpecTypeU64 was not string
+or symbol` (the generated client walked its embedded spec positionally
+and it had drifted a field behind the deployed contract), so this repo
+carried a local decode shim. SDK 0.3.0 decodes the struct internally
+with `scValToNative` (by field name), and the shim is gone —
+`src/chain/readClient.ts` just narrows the SDK's `AttestationView` to
+the hex-only `AttestationRecord` the rest of the repo consumes.
 
 ### Read-only REST API
 
@@ -433,18 +434,13 @@ idempotent. Both transactions are Horizon-confirmed in that document.
 
 ## Setup
 
-Prerequisites: **Node ≥ 22.6** + npm (CI uses Node 24), and a local
-checkout of `proofowl-contracts` as a **sibling directory**
-(`../proofowl-contracts`) — the contract SDK is consumed as a
-`file:` dependency.
+Prerequisites: **Node ≥ 22.6** + npm (CI uses Node 24). The contract
+SDK (`@proofowl/contract-sdk`) is a normal published dependency, so
+this repo installs from a single `npm install` — no sibling checkout of
+`proofowl-contracts` required.
 
 ```bash
-# from a directory containing both repos
-git clone <proofowl-contracts>        # if you don't have it
 git clone <proofowl-backend> && cd proofowl-backend
-
-# build the sibling SDK once
-( cd ../proofowl-contracts/sdk/typescript && npm ci && npm run build )
 
 npm install                            # runs `prisma generate`
 cp .env.example .env
