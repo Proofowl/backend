@@ -7,26 +7,80 @@
  * this pass.
  *
  * Contract bindings and the RPC round-trip come from
- * `@proofowl/contract-sdk` (`createReadClient` for scalar reads; its
- * generated `Client` for the attestation struct reads, decoded through
- * ./attestationDecode.ts — see that file for why the SDK's own struct
- * decoder is bypassed).
+ * `@proofowl/contract-sdk`'s `createReadClient` — scalar reads and the
+ * `Attestation`-struct reads alike. As of SDK 0.3.0 `getAttestation` /
+ * `getAttestationsPage` decode the struct with `scValToNative` (by
+ * field name), so the local decode shim this module used to route the
+ * struct reads through is gone.
  */
 
 import {
   createReadClient,
-  generated,
+  type AttestationView,
   type ProofOwlContractConfig,
   type ProofOwlReadClient,
 } from "@proofowl/contract-sdk";
 
 import { ValidationError } from "../lib/errors.js";
-import {
-  decodeAllAttestations,
-  decodeAttestationsPage,
-  type AttestationRecord,
-  type GeneratedClient,
-} from "./attestationDecode.js";
+
+/** One attestation, decoded from the contract's `Attestation` struct. */
+export interface AttestationRecord {
+  /** `github_id_hash` linked to the wallet when this entry was recorded (ADR 0005), lowercase hex. */
+  githubIdHashHex: string;
+  /** `"<owner>/<repo>"` exactly as stored on-chain. */
+  repo: string;
+  prNumber: number;
+  /** Stellar Wave issue id, or 0n. */
+  issueId: bigint;
+  /** One of 0, 100, 150, 200. */
+  complexity: number;
+  /** Canonical PR hash — the global de-dup key — lowercase hex. */
+  prHashHex: string;
+  /** Ledger close time (Unix seconds) the contract recorded. */
+  timestamp: bigint;
+  /** Zero-based index in the wallet's history (`start + offset`). */
+  sequence: number;
+}
+
+/**
+ * Narrow the SDK's `AttestationView` (which also carries the raw
+ * `Uint8Array` hashes) down to this module's hex-only record. Field
+ * types are otherwise identical.
+ */
+function toRecord(a: AttestationView): AttestationRecord {
+  return {
+    githubIdHashHex: a.githubIdHashHex,
+    repo: a.repo,
+    prNumber: a.prNumber,
+    issueId: a.issueId,
+    complexity: a.complexity,
+    prHashHex: a.prHashHex,
+    timestamp: a.timestamp,
+    sequence: a.sequence,
+  };
+}
+
+/**
+ * Page through `wallet`'s entire attestation history (oldest first),
+ * following contract-api-v2 §7: advance `start` by the page length,
+ * stop on a short page. Page size is the contract max (50).
+ */
+async function listAllAttestations(
+  sdk: ProofOwlReadClient,
+  wallet: string,
+): Promise<AttestationRecord[]> {
+  const PAGE = 50;
+  const all: AttestationRecord[] = [];
+  let start = 0;
+  // Hard ceiling so a misbehaving RPC can't spin forever.
+  for (let guard = 0; guard < 10_000; guard++) {
+    const page = await sdk.getAttestationsPage(wallet, start, PAGE);
+    all.push(...page.map(toRecord));
+    if (page.length < PAGE) break;
+    start += page.length;
+  }
+  return all;
+}
 
 const HEX32_RE = /^[0-9a-fA-F]{64}$/;
 const STRKEY_G_RE = /^G[A-Z2-7]{55}$/;
@@ -108,12 +162,6 @@ export interface ChainReadClient {
 
 export function createChainReadClient(config: ProofOwlContractConfig): ChainReadClient {
   const sdk = createReadClient(config);
-  const genClient: GeneratedClient = new generated.Client({
-    contractId: config.contractId,
-    rpcUrl: config.rpcUrl,
-    networkPassphrase: config.networkPassphrase,
-    allowHttp: config.allowHttp ?? false,
-  });
 
   const api: ChainReadClient = {
     config,
@@ -151,12 +199,13 @@ export function createChainReadClient(config: ProofOwlContractConfig): ChainRead
       if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
         throw new ValidationError("limit must be in 1..=50 (contract MAX_PAGE_SIZE)");
       }
-      return decodeAttestationsPage(genClient, wallet, start, limit);
+      const page = await sdk.getAttestationsPage(wallet, start, limit);
+      return page.map(toRecord);
     },
 
     async listAttestations(wallet) {
       assertWallet(wallet);
-      return decodeAllAttestations(genClient, wallet);
+      return listAllAttestations(sdk, wallet);
     },
 
     async isContributionAlreadyAttested(githubIdHashHex, prHashHex) {
@@ -173,7 +222,7 @@ export function createChainReadClient(config: ProofOwlContractConfig): ChainRead
           confidence: "unlinked-identity",
         };
       }
-      const history = await decodeAllAttestations(genClient, linkedWallet);
+      const history = await listAllAttestations(sdk, linkedWallet);
       const match = history.find((a) => a.prHashHex.toLowerCase() === wantHex) ?? null;
       return {
         prHashHex: wantHex,

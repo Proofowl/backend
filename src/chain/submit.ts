@@ -41,8 +41,7 @@ import {
 import { ValidationError } from "../lib/errors.js";
 import { hashGitHubPullRequestV1, hashGitHubPullRequestV1Hex } from "../hashing/identifiers.js";
 import type { VerificationResult } from "../github/types.js";
-import type { AttestationRecord } from "./attestationDecode.js";
-import type { ChainReadClient } from "./readClient.js";
+import type { AttestationRecord, ChainReadClient } from "./readClient.js";
 
 export type { ComplexityTier };
 

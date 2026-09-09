@@ -28,8 +28,7 @@ import {
   type SubmitAttestationDeps,
 } from "../../src/chain/submit.js";
 import { createSdkAttestationSubmitter } from "../../src/chain/attestationSubmitter.js";
-import type { AttestationRecord } from "../../src/chain/attestationDecode.js";
-import type { ChainReadClient } from "../../src/chain/readClient.js";
+import type { AttestationRecord, ChainReadClient } from "../../src/chain/readClient.js";
 import type {
   CheckOutcome,
   VerificationCandidate,
