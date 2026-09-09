@@ -5,7 +5,7 @@
 // on-chain yet because the contributor's wallet is not linked to their
 // GitHub identity in the registry (submit_attestation would fail with
 // WalletNotLinked, contract error 7 — see
-// ../proofowl-contracts/docs/integration/contract-api-v2.md#errors).
+// proofowl-contracts/docs/integration/contract-api-v2.md#errors).
 //
 // No leaderboard cache, no attestation mirror, no REST-API tables —
 // those are explicitly follow-up work.
